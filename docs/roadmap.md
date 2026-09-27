@@ -44,6 +44,8 @@ All items below are planned unless explicitly marked complete.
 - [x] Return to the connection manager after disconnect or failure.
 - Concurrent connections; see [session design](sessions.md).
 - Validate against Windows RDP, xrdp and GNOME Remote Desktop.
+- Support TLS-only RDP sessions; the [first xrdp check](linux-xrdp-first-probe.md)
+  reaches verified TLS but stops before login because NLA was not selected.
 - Test Danish/US keyboards, Wayland/X11, scaling and network interruption.
 
 ## 3 — Everyday use
