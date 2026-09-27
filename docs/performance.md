@@ -63,6 +63,40 @@ removed the staged partial file, and cleared the local file clipboard.
 A 128 MiB Linux-to-Windows copy showed the upload completion title, and the
 Windows file's SHA-256 matched its Linux source.
 
+### Windows 11 higher-rate experiment, 2026-09-27
+
+The same VM was rebooted with `DWMFRAMEINTERVAL=15` for a temporary test.
+[Microsoft documents this as a way to raise the RDP maximum to 60 FPS on
+Windows Server](https://learn.microsoft.com/en-us/troubleshoot/windows-server/remote/frame-rate-limited-to-30-fps);
+its effect on this Windows 11 VM was tested empirically. The 960×1056 bitmap
+session ran the same Edge animation. Fjern and FreeRDP 3.31.1 (`wlfreerdp3`,
+`-gfx -rfx`) were recorded separately in the same 960×1056 Wayland region at
+60 frames/s. The browser page was visible throughout each recording. The
+center-scanline stripe changes were counted with
+`python3 tools/analyze_rdp_capture.py <recording.mp4>`:
+
+| Client | First capture | Second capture |
+| --- | ---: | ---: |
+| Fjern, unchanged 16 ms bitmap batch age | 49.38/s (36.63 s) | 48.62/s (35.85 s) |
+| FreeRDP | 53.54/s (55.38 s) | 54.53/s (40.80 s) |
+
+This establishes that the VM can deliver more than 32 visible changes/s with
+both clients under this temporary setting. FreeRDP was about 5 changes/s ahead
+in these sequential captures, but the recordings do not identify which stage
+caused the gap. Fjern's internal paint-attempt rate was roughly 50–60/s; those
+attempts are not confirmed compositor scanouts. A diagnostic run observed no
+Wayland buffer-pool stalls. Shortening the maximum bitmap batch age from 16 to
+12 ms yielded 49.37/s; 8 ms yielded 47.41/s. Neither change improved the
+visible result, so both were reverted. The next investigation should timestamp
+remote bitmap arrival, snapshot publication, window submission and compositor
+presentation before changing the batching or renderer. The temporary registry
+value, test user and page were removed, and the VM was returned to stopped.
+
+`analyze_rdp_capture.py` requires `ffmpeg` and `ffprobe` and assumes an
+unscaled recording with the benchmark page visible at its center scanline. It
+counts distinct stripe positions in the captured images, not RDP updates,
+browser animation callbacks or physical display refreshes.
+
 ## VNC tile scheduling and CopyRect
 
 The ZRLE decoder emits one image event per 64×64 tile. A full 1920×1080
