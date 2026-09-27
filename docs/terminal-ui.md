@@ -52,6 +52,9 @@ After a connection closes or fails, Fjern restores the terminal
 screen and returns to the connection screen with the result. The terminal is
 restored before the hidden password prompt, network connection, or desktop
 window starts.
+**Reconnect** or Ctrl+R repeats the previous connection attempt with the same
+settings. It never retries on its own. Certificate verification and password
+entry run again; an edited but unsaved form does not change the retry target.
 
 Profiles contain connection settings only. Fjern never saves passwords. It
 stores at most 100 validated profiles in

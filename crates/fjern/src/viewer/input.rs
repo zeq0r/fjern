@@ -109,6 +109,7 @@ pub(super) struct Controller {
     ignored_buttons: [bool; 3],
     position: Option<(u16, u16)>,
     wheel: f32,
+    cancel_requested: bool,
 }
 struct PointerTransition {
     button: usize,
@@ -153,6 +154,7 @@ impl Controller {
         window: &mut Window,
         ready: bool,
         remote: (usize, usize),
+        can_cancel: bool,
     ) -> Result<Vec<Input>, &'static str> {
         let focused = ready && window.is_active();
         let keys = window.get_keys().into_iter().collect();
@@ -170,6 +172,10 @@ impl Controller {
             {
                 transitions.push((key, true));
             }
+        }
+        let cancel = can_cancel && focused && cancel_chord(&keys, &transitions);
+        if cancel {
+            transitions.retain(|(key, _)| *key != Key::C);
         }
         let position = window
             .get_unscaled_mouse_pos(MouseMode::Pass)
@@ -192,7 +198,7 @@ impl Controller {
         let wheel = window
             .get_scroll_wheel()
             .map_or(0., |(_, y)| if self.wayland { -y / 15. } else { y });
-        Ok(self.sample(Sample {
+        let mut events = self.sample(Sample {
             focused,
             keys,
             keys_changed: transitions,
@@ -200,7 +206,16 @@ impl Controller {
             position,
             buttons,
             wheel,
-        }))
+        });
+        if cancel {
+            events.push(Input::ReleaseAll);
+            self.reset();
+            self.cancel_requested = true;
+        }
+        Ok(events)
+    }
+    pub fn take_cancel(&mut self) -> bool {
+        std::mem::take(&mut self.cancel_requested)
     }
     fn sample(&mut self, sample: Sample) -> Vec<Input> {
         let Sample {
@@ -316,6 +331,14 @@ impl Controller {
         }
         events
     }
+}
+fn cancel_chord(keys: &BTreeSet<Key>, transitions: &[(Key, bool)]) -> bool {
+    (keys.contains(&Key::LeftCtrl) || keys.contains(&Key::RightCtrl))
+        && (keys.contains(&Key::LeftAlt) || keys.contains(&Key::RightAlt))
+        && (keys.contains(&Key::LeftShift) || keys.contains(&Key::RightShift))
+        && transitions
+            .iter()
+            .any(|(key, down)| *key == Key::C && *down)
 }
 fn button_index(button: MouseButton) -> usize {
     match button {
@@ -521,6 +544,17 @@ mod tests {
         }
         assert!(queue.borrow().overflow);
         assert_eq!(queue.borrow().events.len(), 192);
+    }
+    #[test]
+    fn clipboard_cancel_chord_requires_modifiers_and_a_new_c_press() {
+        let keys = [Key::LeftCtrl, Key::RightAlt, Key::LeftShift, Key::C]
+            .into_iter()
+            .collect();
+        assert!(cancel_chord(&keys, &[(Key::C, true)]));
+        assert!(!cancel_chord(&keys, &[(Key::C, false)]));
+        assert!(!cancel_chord(&keys, &[]));
+        let without_shift = [Key::LeftCtrl, Key::RightAlt, Key::C].into_iter().collect();
+        assert!(!cancel_chord(&without_shift, &[(Key::C, true)]));
     }
     #[test]
     fn modifier_release_before_next_key_keeps_event_order() {

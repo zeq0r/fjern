@@ -5,6 +5,12 @@ Nautilus, focus Fjern, and paste in Windows File Explorer with Ctrl+V. For the
 reverse direction, copy in Windows File Explorer, wait for the download to
 complete, then paste in the local file manager. Unicode text also works in both
 directions. Use Copy (Ctrl+C); Cut/move and drag-and-drop are not implemented.
+The RDP window title shows file-transfer bytes while copying. Press
+Ctrl+Alt+Shift+C in the focused window to cancel an active transfer without
+disconnecting. A cancelled Windows-to-Linux download discards its staged files;
+copy the selection again to restart. For Linux-to-Windows copies, the displayed
+count is bytes served in file requests and may include repeated reads by the
+remote application.
 No shared drive or server installation is required.
 
 ```sh
@@ -51,8 +57,9 @@ Transfer errors are reported in the launching terminal. File-format requests
 have no transaction identifier: after a timeout, an outstanding response must
 be drained before another request can be sent safely. An unresponsive peer may
 therefore require reconnection. Malformed required protocol messages disconnect
-the session. A graphical progress indicator, cancellation controls, streaming
-paste-on-demand and broader clipboard compatibility remain future work.
+the session. An in-window progress bar, streaming paste-on-demand and broader
+clipboard compatibility remain future work. Transfer status currently uses the
+window title; it does not confirm that the remote application completed its paste.
 
 ## Protocol and verification
 

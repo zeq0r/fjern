@@ -15,7 +15,7 @@ use std::{
     net::{Shutdown, TcpStream},
     sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver},
     },
     time::{Duration, Instant},
@@ -34,6 +34,13 @@ struct Display {
     status: String,
     epoch: u64,
     window_size: (usize, usize),
+    remote_updates: u64,
+    published_at: Option<Instant>,
+}
+struct InputBatch {
+    epoch: u64,
+    queued_at: Instant,
+    events: Vec<Input>,
 }
 
 pub fn run(
@@ -65,6 +72,8 @@ pub fn run(
         None
     };
     let clipboard_focus = clipboard.as_ref().map(|c| c.focused());
+    let transfer_status = clipboard.as_ref().map(|c| c.transfer_status());
+    let transfer_cancel = clipboard.as_ref().map(|c| c.cancel_handle());
     let (domain, username) = crate::nla::account(account)?;
     let info = state.client_info(
         domain,
@@ -102,14 +111,18 @@ pub fn run(
         status: "Connecting".into(),
         epoch: 0,
         window_size: (initial_width, initial_height),
+        remote_updates: 0,
+        published_at: None,
     });
     let stop = AtomicBool::new(false);
     let shutdown = stream.try_clone()?;
     let mut transport = transport::Transport::new(stream.try_clone()?)?;
-    let (sender, receiver) = mpsc::sync_channel::<(u64, Vec<Input>)>(128);
+    let (sender, receiver) = mpsc::sync_channel::<InputBatch>(128);
+    let input_queue_max = AtomicU64::new(0);
     std::thread::scope(|scope| -> Result<(), Error> {
         let shared = &shared;
         let stop = &stop;
+        let input_queue_max = &input_queue_max;
         let worker = scope.spawn(move || {
             let result = receive(
                 connection,
@@ -121,6 +134,7 @@ pub fn run(
                 &mut Channels {
                     clipboard: &mut clipboard,
                     resize: &mut resize,
+                    input_queue_max,
                 },
             );
             // Release only input actually sent, including when the UI closes.
@@ -146,6 +160,15 @@ pub fn run(
             let mut rendered_size = (0, 0);
             let mut rendered_revision = u64::MAX;
             let mut rendered_remote = (0, 0);
+            let mut base_title = "Fjern — Connecting".to_owned();
+            let mut shown_title = base_title.clone();
+            let stats_enabled = crate::metrics::enabled();
+            let mut stats_since = Instant::now();
+            let mut stats_updates = 0;
+            let mut last_remote_updates = 0;
+            let mut stats_paints = 0u64;
+            let mut stats_paint_max = Duration::ZERO;
+            let mut stats_queue_max = Duration::ZERO;
             while window.is_open() {
                 let ready;
                 {
@@ -159,18 +182,47 @@ pub fn run(
                         return Err(error.clone().into());
                     }
                     if revision == 0 {
-                        window.set_title(&format!("Fjern — {}", frame.status));
+                        base_title = format!("Fjern — {}", frame.status);
                     }
                     if frame.revision != revision {
+                        if let Some(published_at) = frame.published_at {
+                            stats_queue_max = stats_queue_max.max(published_at.elapsed());
+                        }
                         frame.take_pixels(&mut pixels);
                         width = frame.width;
                         height = frame.height;
                         revision = frame.revision;
                         if !shown || (width, height) != rendered_remote {
-                            window.set_title(&format!("Fjern — {host} — {width}×{height}"));
+                            base_title = format!("Fjern — {host} — {width}×{height}");
                         }
                     }
+                    stats_updates += if frame.remote_updates < last_remote_updates {
+                        frame.remote_updates
+                    } else {
+                        frame.remote_updates - last_remote_updates
+                    };
+                    last_remote_updates = frame.remote_updates;
                     ready = frame.active && revision != 0;
+                }
+                let transfer = transfer_status
+                    .as_ref()
+                    .map(|status| status.lock().unwrap().clone())
+                    .unwrap_or_default();
+                let title = if transfer.active {
+                    format!(
+                        "Fjern — {}: {}/{} bytes — Ctrl+Alt+Shift+C cancels",
+                        transfer.message.unwrap_or("Copying files"),
+                        transfer.done,
+                        transfer.total
+                    )
+                } else if let Some(message) = transfer.message {
+                    format!("{base_title} — {message}")
+                } else {
+                    base_title.clone()
+                };
+                if title != shown_title {
+                    window.set_title(&title);
+                    shown_title = title;
                 }
                 let size = window.get_size();
                 if size.0 == 0 || size.1 == 0 {
@@ -178,15 +230,20 @@ pub fn run(
                         focused.store(false, Ordering::Relaxed);
                     }
                     window.update();
-                    let events = controller.poll(&mut window, false, (width, height))?;
+                    let events = controller.poll(&mut window, false, (width, height), false)?;
                     if !events.is_empty() {
                         sender
-                            .try_send((input_epoch, events))
+                            .try_send(InputBatch {
+                                epoch: input_epoch,
+                                queued_at: Instant::now(),
+                                events,
+                            })
                             .map_err(|_| "input queue unavailable")?;
                     }
                     continue;
                 }
                 if size != rendered_size || revision != rendered_revision || window.needs_redraw() {
+                    let paint_started = Instant::now();
                     if size == (width, height) {
                         window.update_with_buffer(&pixels.pixels, width, height)?;
                     } else {
@@ -198,6 +255,8 @@ pub fn run(
                         )?;
                         window.update_with_buffer(&rendered, size.0, size.1)?;
                     }
+                    stats_paints += 1;
+                    stats_paint_max = stats_paint_max.max(paint_started.elapsed());
                     rendered_size = size;
                     rendered_remote = (width, height);
                     rendered_revision = revision;
@@ -209,17 +268,46 @@ pub fn run(
                 if let Some(focused) = &clipboard_focus {
                     focused.store(ready && window.is_active(), Ordering::Relaxed);
                 }
-                let events = controller.poll(&mut window, ready, (width, height))?;
+                let events =
+                    controller.poll(&mut window, ready, (width, height), transfer.active)?;
+                if controller.take_cancel()
+                    && let Some(cancel) = &transfer_cancel
+                {
+                    cancel.store(true, Ordering::Relaxed);
+                }
                 if !events.is_empty() {
-                    sender.try_send((input_epoch, events)).map_err(
-                        |_| "input queue unavailable; disconnecting to avoid lost key releases",
-                    )?;
+                    sender
+                        .try_send(InputBatch {
+                            epoch: input_epoch,
+                            queued_at: Instant::now(),
+                            events,
+                        })
+                        .map_err(
+                            |_| "input queue unavailable; disconnecting to avoid lost key releases",
+                        )?;
                 }
                 if ready && !shown {
                     println!(
                         "First remote bitmap displayed: {width}x{height}. Close the window to disconnect; the remote account is not signed out."
                     );
                     shown = true;
+                }
+                if stats_enabled && stats_since.elapsed() >= Duration::from_secs(2) {
+                    let seconds = stats_since.elapsed().as_secs_f64();
+                    eprintln!(
+                        "RDP stats: updates/s={:.1} paint-attempts/s={:.1} paint-max-ms={:.2} snapshot-wait-max-ms={:.2} input-queue-max-ms={:.2} rss-mib={:.1}",
+                        stats_updates as f64 / seconds,
+                        stats_paints as f64 / seconds,
+                        stats_paint_max.as_secs_f64() * 1000.0,
+                        stats_queue_max.as_secs_f64() * 1000.0,
+                        input_queue_max.swap(0, Ordering::Relaxed) as f64 / 1_000_000.0,
+                        crate::metrics::rss_mib().unwrap_or(0.0),
+                    );
+                    stats_since = Instant::now();
+                    stats_updates = 0;
+                    stats_paints = 0;
+                    stats_paint_max = Duration::ZERO;
+                    stats_queue_max = Duration::ZERO;
                 }
             }
             Ok(())
@@ -240,6 +328,7 @@ pub fn run(
 struct Channels<'a> {
     clipboard: &'a mut Option<crate::clipboard::Clipboard>,
     resize: &'a mut Option<resize::Resize>,
+    input_queue_max: &'a AtomicU64,
 }
 fn receive(
     connection: &mut rustls::ClientConnection,
@@ -247,7 +336,7 @@ fn receive(
     state: &mut Session,
     shared: &Mutex<Display>,
     stop: &AtomicBool,
-    input: &Receiver<(u64, Vec<Input>)>,
+    input: &Receiver<InputBatch>,
     channels: &mut Channels<'_>,
 ) -> Result<(), Error> {
     let mut pending = Vec::new();
@@ -289,16 +378,20 @@ fn receive(
             }
         }
         // A bounded channel preserves input ordering without blocking the UI.
-        for (epoch, events) in input.try_iter().take(128) {
-            if epoch != shared.lock().unwrap().epoch
+        for batch in input.try_iter().take(128) {
+            if batch.epoch != shared.lock().unwrap().epoch
                 || channels.resize.as_ref().is_some_and(|r| r.waiting())
             {
                 continue;
             }
+            channels.input_queue_max.fetch_max(
+                batch.queued_at.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            if let Some(packet) = state.input(&events)? {
+            if let Some(packet) = state.input(&batch.events)? {
                 stream.write_plaintext(connection, &data::encode(&packet)?)?;
             }
         }
@@ -321,19 +414,13 @@ fn receive(
         match stream.read_chunk(connection, &mut bytes, batch.read_budget()) {
             Ok(0) => return Err("server closed the desktop connection".into()),
             Ok(count) => {
-                if pending.is_empty() {
-                    partial_since = Some(Instant::now());
-                }
                 pending.extend_from_slice(&bytes[..count]);
                 if pending.len() > u16::MAX as usize + bytes.len() {
                     return Err("desktop receive buffer exceeded limit".into());
                 }
-                while let Some(length) = frame_length(&pending)? {
-                    if pending.len() < length {
-                        break;
-                    }
-                    let replies = if pending[0] == 3 {
-                        let payload = data::decode(&pending[..length])?;
+                let consumed = consume_framed(&mut pending, |packet| {
+                    let replies = if packet[0] == 3 {
+                        let payload = data::decode(packet)?;
                         if payload.first() == Some(&0x68) {
                             let (channel, body) = linrdp_proto::channel::indication(payload)?;
                             if let Some(clipboard) = channels
@@ -353,7 +440,7 @@ fn receive(
                             state.receive(payload)?
                         }
                     } else {
-                        state.receive_fastpath(&pending[..length])?;
+                        state.receive_fastpath(packet)?;
                         Vec::new()
                     };
                     for message in state.notifications.drain(..) {
@@ -363,12 +450,6 @@ fn receive(
                     for reply in replies {
                         stream.write_plaintext(connection, &data::encode(&reply)?)?;
                     }
-                    pending.drain(..length);
-                    partial_since = if pending.is_empty() {
-                        None
-                    } else {
-                        Some(Instant::now())
-                    };
                     if state.phase != last_phase {
                         println!("Desktop phase: {:?}.", state.phase);
                         {
@@ -391,6 +472,14 @@ fn receive(
                             updates = 0;
                         }
                     }
+                    Ok(())
+                })?;
+                if pending.is_empty() {
+                    partial_since = None;
+                } else if consumed > 0 {
+                    partial_since = Some(Instant::now());
+                } else {
+                    partial_since.get_or_insert_with(Instant::now);
                 }
             }
             Err(error)
@@ -425,4 +514,58 @@ fn receive(
         }
     }
     Ok(())
+}
+
+fn consume_framed(
+    pending: &mut Vec<u8>,
+    mut process: impl FnMut(&[u8]) -> Result<(), Error>,
+) -> Result<usize, Error> {
+    let mut consumed = 0;
+    while let Some(length) = frame_length(&pending[consumed..])? {
+        if pending.len() - consumed < length {
+            break;
+        }
+        process(&pending[consumed..consumed + length])?;
+        consumed += length;
+    }
+    // Several PDUs can arrive in one TLS read. Move a trailing partial PDU
+    // once, rather than shifting it after every complete PDU.
+    if consumed != 0 {
+        pending.drain(..consumed);
+    }
+    Ok(consumed)
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+
+    #[test]
+    fn coalesced_packets_preserve_trailing_fragment_and_order() {
+        let first = [0, 5, 1, 2, 3];
+        let second = [3, 0, 0, 7, 4, 5, 6];
+        let mut pending = [first.as_slice(), second.as_slice(), &[0, 5, 7]].concat();
+        let mut seen = Vec::new();
+        assert_eq!(
+            consume_framed(&mut pending, |packet| {
+                seen.push(packet.to_vec());
+                Ok(())
+            })
+            .unwrap(),
+            first.len() + second.len()
+        );
+        assert_eq!(seen, [first.as_slice(), second.as_slice()]);
+        assert_eq!(pending, [0, 5, 7]);
+        pending.extend_from_slice(&[8, 9]);
+        assert_eq!(
+            consume_framed(&mut pending, |packet| {
+                seen.push(packet.to_vec());
+                Ok(())
+            })
+            .unwrap(),
+            5
+        );
+        assert_eq!(seen[2], [0, 5, 7, 8, 9]);
+        assert!(pending.is_empty());
+    }
 }

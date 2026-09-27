@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Fjern RDP benchmark</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #001122; }
+  #stripe { position: absolute; top: 20%; height: 60%; width: 12%; background: white; }
+  #signal { position: absolute; inset: 0 0 auto; height: 10%; background: #003300; }
+</style>
+<div id="stripe"></div>
+<div id="signal"></div>
+<script>
+  let frame = 0;
+  const stripe = document.querySelector('#stripe');
+  const signal = document.querySelector('#signal');
+  function tick() {
+    stripe.style.left = `${((frame++ % 120) / 120) * 88}%`;
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+  document.addEventListener('keydown', event => {
+    if (event.code === 'Space') {
+      signal.style.background = signal.style.background === 'rgb(255, 0, 0)'
+        ? '#003300' : '#ff0000';
+      event.preventDefault();
+    }
+  });
+</script>

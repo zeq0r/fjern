@@ -25,6 +25,9 @@ reconnection needs bounded backoff, cancellation and separate handling for
 transport loss, authentication rejection and certificate changes. Do not retry
 password failures automatically. Reconnection cookies are secrets and must not
 be logged or stored as ordinary connection preferences.
+The connection manager now offers a manual Reconnect action after an attempt.
+It starts a fresh connection with the previous settings and normal trust and
+password checks; whether the server resumes the remote work is its decision.
 
 Dynamic resolution for the current single window and single monitor is
 implemented, defaults to on, and falls back to local scaling when Display Control
@@ -60,7 +63,8 @@ cases, rather than assuming all Linux RDP hosts have identical behavior.
 3. Client information, valid-client licensing, capabilities and session activation: implemented.
 4. Bitmap display in one window: implemented and visually verified against Windows.
    Basic keyboard/pointer input forwarding and focus-loss releases are implemented.
-5. Disconnect/reconnect behavior against real hosts, then concurrent connections.
+5. Manual reconnect is implemented in the connection manager; validate it
+   against real hosts before automatic reconnect or concurrent connections.
 
 Authentication and early authorization have passed on a Windows test host.
 Basic settings, channel setup, Client Info, licensing, activation and first

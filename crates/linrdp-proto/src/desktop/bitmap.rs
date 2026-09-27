@@ -176,9 +176,23 @@ impl Framebuffer {
                 // decoder changes channel packing, but preserves that row order.
                 let row = (usize::from(height) - 1 - y) * stride;
                 let dest = (usize::from(top) + y) * usize::from(self.width) + usize::from(left);
-                for x in 0..usize::from(right - left + 1) {
-                    let off = row + x * bytes_per_pixel;
-                    if bpp != 16 {
+                let width = usize::from(right - left + 1);
+                if bpp == 16 {
+                    let source = &pixels[row..row + width * 2];
+                    let target = &mut self.pixels[dest..dest + width];
+                    for (bytes, pixel) in source.as_chunks::<2>().0.iter().zip(target.iter_mut()) {
+                        let n = u16::from_le_bytes([bytes[0], bytes[1]]);
+                        let red = u32::from((n >> 11) & 31);
+                        let green = u32::from((n >> 5) & 63);
+                        let blue = u32::from(n & 31);
+                        *pixel = (((red << 3) | (red >> 2)) << 16)
+                            | (((green << 2) | (green >> 4)) << 8)
+                            | (blue << 3)
+                            | (blue >> 2);
+                    }
+                } else {
+                    for x in 0..width {
+                        let off = row + x * bytes_per_pixel;
                         let (red, green, blue) = if rgb_order {
                             (pixels[off], pixels[off + 1], pixels[off + 2])
                         } else {
@@ -186,16 +200,7 @@ impl Framebuffer {
                         };
                         self.pixels[dest + x] =
                             (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue);
-                        continue;
                     }
-                    let n = u16::from_le_bytes([pixels[off], pixels[off + 1]]);
-                    let red = u32::from((n >> 11) & 31);
-                    let green = u32::from((n >> 5) & 63);
-                    let blue = u32::from(n & 31);
-                    self.pixels[dest + x] = (((red << 3) | (red >> 2)) << 16)
-                        | (((green << 2) | (green >> 4)) << 8)
-                        | (blue << 3)
-                        | (blue >> 2);
                 }
             }
             self.updates = self.updates.saturating_add(1);
@@ -215,6 +220,60 @@ mod tests {
         }
         output.extend(bytes);
         output
+    }
+    #[test]
+    #[ignore = "release CPU benchmark; run with --ignored --nocapture"]
+    fn benchmark_rgb565_bitmap_update() {
+        use std::{hint::black_box, time::Instant};
+        let mut packets = Vec::new();
+        for top in (0..1080u16).step_by(16) {
+            let height = (1080 - top).min(16);
+            let bytes: Vec<u8> = (0..usize::from(height) * 1920 * 2)
+                .map(|index| ((index * 73 + usize::from(top) * 11) & 255) as u8)
+                .collect();
+            let mut packet = Vec::with_capacity(22 + bytes.len());
+            for field in [
+                1,
+                1,
+                0,
+                top,
+                1919,
+                top + height - 1,
+                1920,
+                height,
+                16,
+                0,
+                bytes.len() as u16,
+            ] {
+                packet.extend_from_slice(&field.to_le_bytes());
+            }
+            packet.extend_from_slice(&bytes);
+            packets.push(packet);
+        }
+        let mut frame = Framebuffer::new(1920, 1080).unwrap();
+        let mut samples = [0.; 5];
+        for sample in &mut samples {
+            let started = Instant::now();
+            for _ in 0..5 {
+                for packet in &packets {
+                    frame.update(black_box(packet)).unwrap();
+                }
+            }
+            *sample = started.elapsed().as_secs_f64() * 1000.0 / 5.0;
+            black_box(&frame.pixels);
+        }
+        samples.sort_by(f64::total_cmp);
+        assert_eq!(frame.updates, (packets.len() * 25) as u64);
+        println!("1920×1080 RGB565 bitmap update: {:.3} ms/frame", samples[2]);
+    }
+    #[test]
+    fn rgb565_bitmap_preserves_color_and_bottom_up_rows() {
+        let mut frame = Framebuffer::new(1, 2).unwrap();
+        // Blue bottom row, then red top row, each with DIB row padding.
+        frame
+            .update(&update(16, 0, &[0x1f, 0, 0, 0, 0, 0xf8, 0, 0]))
+            .unwrap();
+        assert_eq!(frame.pixels, [0xff0000, 0x0000ff]);
     }
     #[test]
     fn raw_24_and_32_bit_bitmaps_preserve_colors_padding_and_bottom_up_rows() {

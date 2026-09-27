@@ -71,6 +71,8 @@ pub(super) fn publish(
     frame.height = usize::from(state.framebuffer.height);
     std::mem::swap(&mut frame.pixels, staging);
     frame.revision += 1;
+    frame.remote_updates = state.framebuffer.updates;
+    frame.published_at = Some(Instant::now());
     frame.pending = true;
     frame.active = state.phase == Phase::Active && resize_ready;
     *updates = state.revision;

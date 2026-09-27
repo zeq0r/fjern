@@ -23,7 +23,7 @@ def main():
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
         listener.settimeout(15)
-        env = dict(os.environ, XDG_CONFIG_HOME=config, FJERN_VNC_STATS="1")
+        env = dict(os.environ, XDG_CONFIG_HOME=config, FJERN_STATS="1")
         client = subprocess.Popen(
             [sys.argv[1], "vnc", "127.0.0.1", str(listener.getsockname()[1])],
             env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -109,6 +109,7 @@ def main():
             _, stderr = client.communicate(timeout=10)
             log = stderr.decode(errors="replace")
             assert "VNC stats:" in log, log
+            assert "rss-mib=" in log, log
             assert "panicked" not in log and "image encoding" not in log, log
             # Deliberate server EOF is an expected connection error, not a UI close.
             assert client.returncode == 1, (client.returncode, log)

@@ -731,7 +731,7 @@ pub fn run(host: &str, port: u16, user: Option<&str>) -> Result<()> {
         let mut hyprland_capture = HyprlandCapture::new();
         let mut pending_raw: Option<PendingRaw> = None;
         let mut scaler = scaling::Scaler::default();
-        let stats_enabled = env::var_os("FJERN_VNC_STATS").is_some();
+        let stats_enabled = crate::metrics::enabled() || env::var_os("FJERN_VNC_STATS").is_some();
         let mut stats_since = Instant::now();
         let mut stats_updates = 0u64;
         let mut stats_paints = 0u64;
@@ -1040,12 +1040,13 @@ pub fn run(host: &str, port: u16, user: Option<&str>) -> Result<()> {
             if stats_enabled && stats_since.elapsed() >= Duration::from_secs(2) {
                 let seconds = stats_since.elapsed().as_secs_f64();
                 eprintln!(
-                    "VNC stats: updates/s={:.1} paint-attempts/s={:.1} event-max-ms={:.2} scale-ms={:.2} raw-pending={}",
+                    "VNC stats: updates/s={:.1} paint-attempts/s={:.1} event-max-ms={:.2} scale-ms={:.2} raw-pending={} rss-mib={:.1}",
                     stats_updates as f64 / seconds,
                     stats_paints as f64 / seconds,
                     stats_work_max.as_secs_f64() * 1000.0,
                     stats_scale.as_secs_f64() * 1000.0,
-                    pending_raw.is_some()
+                    pending_raw.is_some(),
+                    crate::metrics::rss_mib().unwrap_or(0.0),
                 );
                 stats_since = Instant::now();
                 stats_updates = 0;

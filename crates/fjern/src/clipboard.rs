@@ -1,7 +1,10 @@
 //! Bidirectional clipboard text and streamed file copies. No drive redirection.
 use linrdp_proto::{channel, clipboard as wire};
 use std::{
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 mod files;
@@ -11,6 +14,13 @@ pub enum Selection {
     Empty,
     Text(String),
     Files(files::Inventory),
+}
+#[derive(Clone, Default)]
+pub struct TransferStatus {
+    pub active: bool,
+    pub done: u64,
+    pub total: u64,
+    pub message: Option<&'static str>,
 }
 #[derive(Clone, Copy)]
 enum Format {
@@ -37,6 +47,8 @@ pub struct Clipboard {
     partial_since: Option<Instant>,
     retained: Vec<Arc<tempfile::TempDir>>,
     retained_bytes: u64,
+    transfer: Arc<Mutex<TransferStatus>>,
+    cancel: Arc<AtomicBool>,
 }
 impl Clipboard {
     pub fn new(user: u16, channel: u16) -> Self {
@@ -63,10 +75,18 @@ impl Clipboard {
             partial_since: None,
             retained: Vec::new(),
             retained_bytes: 0,
+            transfer: Arc::new(Mutex::new(TransferStatus::default())),
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
     pub fn focused(&self) -> Arc<AtomicBool> {
         self.native.focused.clone()
+    }
+    pub fn transfer_status(&self) -> Arc<Mutex<TransferStatus>> {
+        self.transfer.clone()
+    }
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        self.cancel.clone()
     }
     pub fn channel(&self) -> u16 {
         self.channel
@@ -79,6 +99,20 @@ impl Clipboard {
         Ok(out)
     }
     pub fn poll(&mut self) -> Result<Vec<Vec<u8>>> {
+        let cancel_requested = self.cancel.swap(false, Ordering::Relaxed);
+        let status = self.transfer.lock().unwrap().clone();
+        let transfer_active = status.active;
+        let revoke_offer = status.message == Some("Sending files");
+        if cancel_requested && transfer_active {
+            self.download = None;
+            self.file_offer = None;
+            self.local_files = None;
+            *self.transfer.lock().unwrap() = TransferStatus {
+                message: Some("File copy cancelled"),
+                ..TransferStatus::default()
+            };
+            println!("Clipboard file copy cancelled.");
+        }
         if self
             .partial_since
             .is_some_and(|t| t.elapsed() > Duration::from_secs(10))
@@ -94,8 +128,15 @@ impl Clipboard {
             self.deadline = None;
             self.desired = None;
             println!("Clipboard transfer timed out; copy the selection again.");
+            *self.transfer.lock().unwrap() = TransferStatus {
+                message: Some("File copy timed out"),
+                ..TransferStatus::default()
+            };
         }
         let mut messages = Vec::new();
+        if cancel_requested && transfer_active && revoke_offer && self.ready {
+            messages.push(self.offer());
+        }
         while let Ok(selection) = self.native.rx.try_recv() {
             let selection = match selection {
                 Ok(selection) => selection,
@@ -114,6 +155,7 @@ impl Clipboard {
                 }
                 self.file_offer = None;
                 self.local_files = None;
+                *self.transfer.lock().unwrap() = TransferStatus::default();
                 self.current = match selection {
                     Selection::Files(files) => {
                         self.local_files = Some(Arc::new(files));
@@ -179,6 +221,7 @@ impl Clipboard {
                 self.download = None;
                 self.pending_stream = None;
                 self.desired = None;
+                *self.transfer.lock().unwrap() = TransferStatus::default();
                 out.push(wire::packet(3, 1, &[]));
                 let format = if self.flags & 4 != 0 {
                     formats
@@ -225,6 +268,12 @@ impl Clipboard {
                     wire::FILES => {
                         if let Some(files) = &self.local_files {
                             self.file_offer = Some(files.clone());
+                            *self.transfer.lock().unwrap() = TransferStatus {
+                                active: true,
+                                total: files.descriptors.iter().map(|f| f.size).sum(),
+                                message: Some("Sending files"),
+                                ..TransferStatus::default()
+                            };
                             Some(wire::encode_files(&files.descriptors)?)
                         } else {
                             None
@@ -264,11 +313,21 @@ impl Clipboard {
                             if self.retained.len() >= 32
                                 || self.retained_bytes + size > wire::MAX_BYTES
                             {
+                                *self.transfer.lock().unwrap() = TransferStatus {
+                                    message: Some("File copy exceeds staging limit"),
+                                    ..TransferStatus::default()
+                                };
                                 println!(
                                     "Clipboard staging budget reached; reconnect before another file copy."
                                 );
                             } else {
                                 self.download = Some(files::Download::new(descriptors)?);
+                                *self.transfer.lock().unwrap() = TransferStatus {
+                                    active: true,
+                                    total: size,
+                                    message: Some("Receiving files"),
+                                    ..TransferStatus::default()
+                                };
                                 println!("Preparing remote files for local paste ({size} bytes).");
                                 self.next_file(&mut out)?;
                             }
@@ -289,6 +348,17 @@ impl Clipboard {
                     .and_then(|files| files.read(request));
                 match result {
                     Ok(bytes) => {
+                        if !request.size_only {
+                            let mut status = self.transfer.lock().unwrap();
+                            status.done = status
+                                .done
+                                .saturating_add(bytes.len() as u64)
+                                .min(status.total);
+                            if status.done == status.total {
+                                status.active = false;
+                                status.message = Some("Files sent");
+                            }
+                        }
                         data.extend(bytes);
                         out.push(wire::packet(9, 1, &data));
                     }
@@ -304,12 +374,18 @@ impl Clipboard {
                 self.deadline = None;
                 if flags != 1 {
                     self.download = None;
-                    println!("Remote file copy failed or was cancelled.");
-                } else {
-                    self.download
-                        .as_mut()
-                        .ok_or("unexpected clipboard file response")?
-                        .append(&body[4..])?;
+                    let cancelled =
+                        self.transfer.lock().unwrap().message == Some("File copy cancelled");
+                    if !cancelled {
+                        *self.transfer.lock().unwrap() = TransferStatus {
+                            message: Some("File copy failed"),
+                            ..TransferStatus::default()
+                        };
+                        println!("Remote file copy failed or was cancelled.");
+                    }
+                } else if let Some(download) = self.download.as_mut() {
+                    download.append(&body[4..])?;
+                    self.transfer.lock().unwrap().done += (body.len() - 4) as u64;
                     self.next_file(&mut out)?;
                 }
             }
@@ -339,6 +415,10 @@ impl Clipboard {
                 ))
                 .map_err(|_| "clipboard worker is busy")?;
             println!("Remote file download completed; publishing the local clipboard.");
+            let mut status = self.transfer.lock().unwrap();
+            status.active = false;
+            status.done = status.total;
+            status.message = Some("Files ready to paste");
         }
         Ok(())
     }
@@ -470,6 +550,83 @@ mod tests {
         assert_eq!(roots.len(), 1);
         assert_eq!(std::fs::read(roots[0].join("data.bin")).unwrap(), data);
         assert_eq!(std::fs::metadata(roots[0].join("empty")).unwrap().len(), 0);
+    }
+    #[test]
+    fn remote_download_reports_progress_and_cancel_discards_partial_files() {
+        let (native, _events, commands) = native::test_pair();
+        let mut c = Clipboard::with_native(1004, 1005, native);
+        incoming(&mut c, wire::capabilities());
+        incoming(&mut c, wire::packet(1, 0, &[]));
+        incoming(&mut c, wire::formats(true));
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            native::Command::Begin(_)
+        ));
+        let descriptors = vec![wire::FileDescriptor {
+            name: "partial.bin".into(),
+            directory: false,
+            size: 100_000,
+        }];
+        let request = incoming(
+            &mut c,
+            wire::packet(5, 1, &wire::encode_files(&descriptors).unwrap()),
+        );
+        let (_, _, body) = wire::parse(&request[0]).unwrap();
+        let first = wire::parse_file_request(body).unwrap();
+        assert_eq!(first.count, 65_536);
+        let dir = c.download.as_ref().unwrap().dir.path().to_owned();
+        let mut response = first.stream.to_le_bytes().to_vec();
+        response.extend(vec![7; first.count as usize]);
+        let next = incoming(&mut c, wire::packet(9, 1, &response));
+        assert_eq!(c.transfer_status().lock().unwrap().done, 65_536);
+        assert_eq!(c.transfer_status().lock().unwrap().total, 100_000);
+        let (_, _, body) = wire::parse(&next[0]).unwrap();
+        let second = wire::parse_file_request(body).unwrap();
+        c.cancel_handle().store(true, Ordering::Relaxed);
+        c.poll().unwrap();
+        assert!(!dir.exists());
+        assert!(!c.transfer_status().lock().unwrap().active);
+        assert_eq!(
+            c.transfer_status().lock().unwrap().message,
+            Some("File copy cancelled")
+        );
+        let mut response = second.stream.to_le_bytes().to_vec();
+        response.extend(vec![8; second.count as usize]);
+        assert!(incoming(&mut c, wire::packet(9, 1, &response)).is_empty());
+        assert!(commands.try_recv().is_err());
+    }
+    #[test]
+    fn cancelled_local_offer_rejects_file_requests_without_disconnect() {
+        let (native, events, _commands) = native::test_pair();
+        let mut c = Clipboard::with_native(1004, 1005, native);
+        incoming(&mut c, wire::capabilities());
+        incoming(&mut c, wire::packet(1, 0, &[]));
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("small.bin");
+        std::fs::write(&path, [1, 2, 3]).unwrap();
+        events
+            .send(Ok(Selection::Files(
+                files::Inventory::collect(&[path]).unwrap(),
+            )))
+            .unwrap();
+        c.poll().unwrap();
+        incoming(&mut c, wire::packet(4, 0, &wire::FILES.to_le_bytes()));
+        assert_eq!(c.transfer_status().lock().unwrap().total, 3);
+        c.cancel_handle().store(true, Ordering::Relaxed);
+        assert_eq!(unpack(c.poll().unwrap()), [wire::packet(2, 0, &[])]);
+        let reply = incoming(
+            &mut c,
+            wire::file_request(wire::FileRequest {
+                stream: 19,
+                index: 0,
+                size_only: false,
+                offset: 0,
+                count: 3,
+            }),
+        );
+        let (kind, flags, body) = wire::parse(&reply[0]).unwrap();
+        assert_eq!((kind, flags), (9, 2));
+        assert_eq!(wire::u32at(body, 0).unwrap(), 19);
     }
     #[test]
     fn timed_out_unidentified_format_response_is_drained_before_retry() {

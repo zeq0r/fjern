@@ -1,6 +1,7 @@
 mod clipboard;
 mod config;
 mod credentials;
+mod metrics;
 mod nla;
 mod ntlm;
 mod profiles;
@@ -12,7 +13,7 @@ mod viewer;
 mod vnc;
 mod vnc_transport;
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -98,7 +99,7 @@ fn run_tui_connection(args: Vec<String>) -> Result<Result<(), String>, Box<dyn s
         Err(error) => return Ok(Err(format!("Check connection details: {error}"))),
     };
     if options.vnc || options.ca_file.is_some() || options.fingerprint.is_some() {
-        return Ok(run(args).map_err(|error| format!("Connection ended: {error}")));
+        return Ok(run(args).map_err(|error| connection_error(error, false)));
     }
     let store = match trust_store::Store::discover() {
         Ok(store) => store,
@@ -146,19 +147,18 @@ fn run_tui_connection(args: Vec<String>) -> Result<Result<(), String>, Box<dyn s
                         .into(),
                 )),
                 tui::CertificateChoice::Once => {
-                    Ok(run(with_pin(&args, pin))
-                        .map_err(|error| format!("Connection ended: {error}")))
+                    Ok(run(with_pin(&args, pin)).map_err(|error| connection_error(error, false)))
                 }
                 tui::CertificateChoice::Trust => {
                     let host = options.host.clone();
                     let port = options.port;
                     let mut remember = || store.remember(&host, port, pin);
                     Ok(run_with_tls_hook(with_pin(&args, pin), Some(&mut remember))
-                        .map_err(|error| format!("Connection ended: {error}")))
+                        .map_err(|error| connection_error(error, false)))
                 }
             }
         }
-        Err(error) => Ok(Err(format!("Connection ended: {error}"))),
+        Err(error) => Ok(Err(connection_error(error, false))),
     }
 }
 
@@ -207,6 +207,22 @@ impl std::error::Error for TlsVerificationError {
     }
 }
 
+#[derive(Debug)]
+struct ConnectionAttemptError(Option<io::Error>);
+impl std::fmt::Display for ConnectionAttemptError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(error) => write!(formatter, "could not connect: {error}"),
+            None => write!(formatter, "could not connect: connection timed out"),
+        }
+    }
+}
+impl std::error::Error for ConnectionAttemptError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.as_ref().map(|error| error as _)
+    }
+}
+
 fn is_approvable_certificate_error(mut error: &(dyn std::error::Error + 'static)) -> bool {
     loop {
         if let Some(rustls::Error::InvalidCertificate(reason)) =
@@ -240,8 +256,42 @@ fn connection_error(error: Box<dyn std::error::Error>, saved_pin: bool) -> Strin
             .is_some_and(|source| source.downcast_ref::<TlsVerificationError>().is_some());
     if saved_pin && tls_failure {
         format!("Saved certificate trust failed; no changes were made: {error}")
+    } else if is_transport_interruption(error.as_ref()) {
+        format!("Connection interrupted: {error}. Use Reconnect to try again.")
     } else {
         format!("Connection ended: {error}")
+    }
+}
+
+fn is_transport_interruption(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error
+            .downcast_ref::<ConnectionAttemptError>()
+            .is_some_and(|e| e.0.is_none())
+        {
+            return true;
+        }
+        if let Some(io_error) = error.downcast_ref::<std::io::Error>()
+            && matches!(
+                io_error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::NotConnected
+            )
+        {
+            return true;
+        }
+        if error.to_string() == "server closed the desktop connection" {
+            return true;
+        }
+        let Some(source) = error.source() else {
+            return false;
+        };
+        error = source;
     }
 }
 
@@ -359,14 +409,7 @@ fn run_with_tls_hook(
             Err(error) => last_error = Some(error),
         }
     }
-    Err(format!(
-        "could not connect: {}",
-        last_error.map_or_else(
-            || "connection timed out".to_owned(),
-            |error| error.to_string()
-        )
-    )
-    .into())
+    Err(ConnectionAttemptError(last_error).into())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -568,6 +611,32 @@ fn read_before(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_failure_suggests_manual_reconnect_without_masking_authentication() {
+        let interrupted: Box<dyn std::error::Error> = Box::new(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "peer reset",
+        ));
+        assert!(connection_error(interrupted, false).contains("Use Reconnect"));
+        assert!(
+            connection_error(
+                Box::new(ConnectionAttemptError(Some(io::Error::from(
+                    io::ErrorKind::ConnectionRefused,
+                )))),
+                false
+            )
+            .contains("Use Reconnect")
+        );
+        assert!(
+            connection_error("server closed the desktop connection".into(), false)
+                .contains("Connection interrupted")
+        );
+        assert_eq!(
+            connection_error("authentication rejected".into(), false),
+            "Connection ended: authentication rejected"
+        );
+    }
     use std::net::TcpListener;
 
     #[test]

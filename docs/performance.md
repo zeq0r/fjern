@@ -1,5 +1,68 @@
 # Desktop presentation performance
 
+## Measuring a live session
+
+Set `FJERN_STATS=1` before launching Fjern to print a two-second interval line
+for either RDP or VNC. Both report completed update rate, attempts to submit an
+image to the window, and current process RSS in MiB. RDP also reports the
+longest window submission, the longest wait between snapshot publication and
+UI pickup, and the longest wait in the input queue before processing. These are
+client-side segments, not input-to-display latency. VNC reports its longest
+event batch and total scaling time per interval. `FJERN_VNC_STATS=1` remains an
+alias for VNC diagnostics.
+
+```sh
+FJERN_STATS=1 cargo run --release -p fjern -- tui 2>fjern-stats.log
+python3 tools/summarize_stats.py fjern-stats.log
+```
+
+Repeat the same 60-second workload three times at a fixed remote resolution:
+10 seconds idle, 20 seconds scrolling a long page, 20 seconds moving a window,
+and 10 seconds idle. Record the host software/version, desktop, codec, network,
+resolution and whether scaling is active. Compare the update and paint-attempt
+rates and peak RSS with an established client on the same host and workload.
+For that client, use its own frame diagnostics or a repeatable screen capture;
+its process RSS should be recorded separately. Do not equate completed VNC
+updates or RDP bitmap batches with actual monitor frames. Window submission is
+also not confirmed compositor scanout. To compare input-to-display latency,
+record the same keyboard action and resulting display change with an external
+high-frame-rate camera or synchronized screen/input capture on both clients.
+The internal snapshot wait measures only one client-side segment of that delay.
+
+### Windows 11 VM comparison, 2026-09-27
+
+A Windows 11 VM on the local network ran `tools/rdp_benchmark.html` in Edge at
+960×1056. The same signed-in desktop and bitmap graphics mode were used for
+Fjern and FreeRDP 3.31.1 (`wlfreerdp3`, `-gfx -rfx`). The local page moves a
+white stripe using `requestAnimationFrame`; Space changes a solid colour band.
+Fjern's last 15 two-second intervals during the animation averaged 636.7 RDP
+bitmap updates/s and 32.0 window paint attempts/s. Its peak RSS was 59.6 MiB,
+with an 8.61 ms longest paint call and 8.53 ms longest snapshot wait. FreeRDP's
+peak `/proc` RSS during the same page was 146.1 MiB. Both windows were shown at
+the same size on the same Wayland desktop.
+
+Both clients were also captured at 60 frames/s with the same Wayland region
+recorder. Counting changes to the stripe on a middle scanline gave 31.98
+visible changes/s over 32.8 s for Fjern and 32.00/s over 48.0 s for FreeRDP.
+The median and 95th-percentile gap between changes were 33.3 ms for both.
+This page and Windows host appear to limit the bitmap workload to about
+32 distinct images/s; it does not establish either client's maximum FPS.
+
+For ten Space presses per client, a one-pixel `grim` capture polled the colour
+band until it changed. Median measured delays were 141.7 ms for Fjern and
+132.1 ms for FreeRDP. The capture and process startup add substantial delay and
+quantize these results; the 9.6 ms median difference is below the method's
+precision. These values establish only that both clients responded on this
+host. Fjern's 32.0/s paint count is a submission rate; the separate recording
+above measured visible content changes.
+
+The first live-host run also verified initial bitmap display, dynamic resolution,
+and clipboard channel activation. A 512 MiB Windows-to-Linux file copy displayed
+progressive byte counts in the title; another run cancelled before completion,
+removed the staged partial file, and cleared the local file clipboard.
+A 128 MiB Linux-to-Windows copy showed the upload completion title, and the
+Windows file's SHA-256 matched its Linux source.
+
 ## VNC tile scheduling and CopyRect
 
 The ZRLE decoder emits one image event per 64×64 tile. A full 1920×1080
@@ -136,6 +199,21 @@ The default profile negotiates RGB565 bitmap updates with interleaved RLE and
 fast-path output. This branch adds an optional [H.264 graphics profile](h264.md).
 Client-side presentation optimizations do not
 reduce network bandwidth or change the server's encoding rate.
+
+The RGB565 bitmap path now traverses validated source and destination row
+slices, avoiding repeated indexed bounds checks for each pixel. An isolated
+release benchmark of 1920×1080 raw RGB565 bitmap updates, split into 16-row
+packets to fit RDP's packet size, measured 14.481 → 11.329 ms per full frame
+on the test machine. This is a 22% reduction in bitmap update CPU time for
+that workload, not an observed remote FPS gain. Reproduce with:
+
+```sh
+cargo test --release -p linrdp-proto benchmark_rgb565_bitmap_update --locked -- --ignored --nocapture
+```
+
+The desktop receiver also walks all complete PDUs in a TLS read before moving
+any trailing partial PDU. This avoids repeatedly shifting the remaining buffer
+when the read contains several packets; the benefit depends on packet batching.
 
 ## Snapshot scheduling
 

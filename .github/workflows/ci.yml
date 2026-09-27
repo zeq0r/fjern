@@ -13,6 +13,7 @@ jobs:
       - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo +stable test --workspace --locked
       - run: python3 tools/test_collect_licenses.py
+      - run: python3 tools/test_summarize_stats.py
       - name: Install XKB runtime for native keyboard regression
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon0
       - run: cargo +stable test --manifest-path vendor/vnc-rs/Cargo.toml --locked --lib

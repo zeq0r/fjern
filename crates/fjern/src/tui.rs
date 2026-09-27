@@ -224,6 +224,7 @@ enum Focus {
     Computer,
     User,
     Connect,
+    Reconnect,
     Options,
     Save,
     SaveAs,
@@ -360,6 +361,7 @@ struct App {
     status: String,
     modal: Option<Modal>,
     editing: Option<usize>,
+    retry: Option<Vec<String>>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -388,6 +390,7 @@ impl App {
             }),
             modal: None,
             editing: None,
+            retry: initial.map(<[String]>::to_vec),
         };
         if let Some(args) = initial
             && let Ok(options) = crate::Options::parse(args)
@@ -426,6 +429,7 @@ impl App {
             Focus::Computer,
             Focus::User,
             Focus::Connect,
+            Focus::Reconnect,
             Focus::Options,
             Focus::Save,
             Focus::SaveAs,
@@ -438,6 +442,7 @@ impl App {
             Focus::Computer,
             Focus::User,
             Focus::Connect,
+            Focus::Reconnect,
             Focus::Options,
             Focus::Save,
             Focus::SaveAs,
@@ -457,6 +462,7 @@ impl App {
             Focus::Computer,
             Focus::User,
             Focus::Connect,
+            Focus::Reconnect,
             Focus::Options,
             Focus::Save,
             Focus::SaveAs,
@@ -509,6 +515,9 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
             return self.save();
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+            return self.reconnect();
         }
         match key.code {
             KeyCode::Esc => Command::Quit,
@@ -600,6 +609,7 @@ impl App {
                     Command::None
                 }
             },
+            Focus::Reconnect => self.reconnect(),
             Focus::Options => {
                 self.advanced = !self.advanced;
                 Command::None
@@ -659,6 +669,16 @@ impl App {
         self.focus = Focus::Computer;
         self.status = "New connection. Enter a computer name or address.".into();
         Command::None
+    }
+
+    fn reconnect(&mut self) -> Command {
+        match &self.retry {
+            Some(arguments) => Command::Connect(arguments.clone()),
+            None => {
+                self.status = "No previous connection to reconnect. Choose Connect first.".into();
+                Command::None
+            }
+        }
     }
 
     fn save(&mut self) -> Command {
@@ -846,6 +866,7 @@ impl App {
             self.focus == Focus::User,
         )?;
         button(out, 29, 10, "Connect", self.focus == Focus::Connect)?;
+        button(out, 57, 10, "Reconnect", self.focus == Focus::Reconnect)?;
         button(
             out,
             41,
@@ -1419,5 +1440,26 @@ mod tests {
         assert!(!app.form.clipboard);
         assert_eq!(app.form.trust, Trust::Ca);
         assert_eq!(app.form.trust_value, "/tmp/Lab CA.pem");
+    }
+
+    #[test]
+    fn reconnect_reuses_last_attempt_without_overwriting_edited_form() {
+        let args = ["connect", "old.example", "--user", "tester"].map(str::to_owned);
+        let mut app = App::new(Vec::new(), Some("Connection ended".into()), Some(&args));
+        app.form.computer = "unsaved.example".into();
+        assert_eq!(
+            app.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            Command::Connect(args.to_vec())
+        );
+        app.focus = Focus::Reconnect;
+        assert_eq!(
+            app.key(key(KeyCode::Enter)),
+            Command::Connect(args.to_vec())
+        );
+        assert_eq!(app.form.computer, "unsaved.example");
+        let mut fresh = App::new(Vec::new(), None, None);
+        fresh.focus = Focus::Reconnect;
+        assert_eq!(fresh.key(key(KeyCode::Enter)), Command::None);
+        assert!(fresh.status.contains("No previous connection"));
     }
 }
