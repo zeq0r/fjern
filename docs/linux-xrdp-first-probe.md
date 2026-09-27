@@ -44,3 +44,35 @@ and key-up sequences. A regression test using a real XKB keymap verifies both
 sequences and release state. The final backend change has not yet been retested
 end to end against xrdp. Clipboard behavior also remains unverified. The VM
 and test account were removed after the check.
+
+## Isolated Wayland end-to-end check
+
+The final backend change in commit `26120b5` was tested against another fresh
+temporary VM with the same xrdp desktop. Fjern ran inside a separate nested
+Hyprland session with its own Wayland socket. The nested compositor's window
+was moved to a hidden workspace on the host, so virtual keyboard input and
+clipboard changes did not reach the active desktop.
+
+Fjern negotiated TLS 1.3 with an explicit SHA-256 certificate pin, activated
+the xrdp desktop, displayed the first bitmap and opened the clipboard channel.
+Typing `FjernXrdpInput42` through the nested Wayland virtual keyboard produced
+that exact string in an xterm inside the guest. This confirms that the final
+uppercase-key fix works through the complete local keyboard → Fjern → xrdp
+path.
+
+Text clipboard transfer succeeded in both directions. A local `wl-copy`
+selection reached the guest's X11 clipboard, and a guest `xclip` selection
+reached local `wl-paste`. Both directions also preserved `æøå` and a newline.
+The first local-to-guest attempt, made immediately after connection, found no
+usable X11 text target; a later attempt succeeded. After roughly 20 minutes,
+the xrdp connection reset during additional clipboard checks. The xrdp log
+recorded an SSL read I/O error but did not identify the cause. A fresh
+connection accepted a local-to-guest clipboard copy immediately. The tests do
+not establish sustained clipboard stability or a cause for the reset.
+
+With `FJERN_STATS=1`, the reconnect showed zero paint attempts per second while
+idle and approximately 45.9 MiB RSS. An xterm updated every 50 ms produced
+approximately 20 new paints per second; the highest reported paint time in the
+steady update intervals was 8.55 ms, with RSS still approximately 45.9 MiB.
+These numbers are from a nested, hidden Wayland session and one 1024×768 xrdp
+desktop, so they are a local baseline rather than a general performance claim.
