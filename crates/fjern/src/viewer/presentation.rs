@@ -225,6 +225,7 @@ mod tests {
         let mut updates = 0;
         let start = Instant::now();
         let mut snapshots = 0;
+        let mut picked = 0;
         let mut batch = Batch::default();
         let clock = Instant::now();
         for index in 0..1024 {
@@ -248,12 +249,16 @@ mod tests {
                 batch.published();
             }
             if index % 64 == 63 {
-                shared.lock().unwrap().take_pixels(&mut output);
+                let mut frame = shared.lock().unwrap();
+                picked += usize::from(frame.pending);
+                frame.take_pixels(&mut output);
             }
         }
-        assert_eq!(shared.lock().unwrap().stats_replaced, 1008);
         snapshots += usize::from(publish(&state, &shared, &mut staging, &mut updates, true));
-        shared.lock().unwrap().take_pixels(&mut output);
+        let mut frame = shared.lock().unwrap();
+        picked += usize::from(frame.pending);
+        frame.take_pixels(&mut output);
+        assert_eq!(frame.stats_replaced as usize + picked, snapshots);
         assert_eq!(output.pixels, state.framebuffer.pixels);
         println!(
             "1080p / 1024 deltas / UI consumes every 64 deltas: per-packet copy {old:?}; demand snapshots {:?}, {snapshots} copies",
