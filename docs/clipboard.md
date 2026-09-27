@@ -21,7 +21,9 @@ fjern connect my-computer.example --user tester --clipboard off
 Apply the usual certificate trust options when needed. The native clipboard
 backend currently requires a Wayland compositor with data-control support.
 Nautilus on the tested Hyprland desktop and Windows File Explorer have passed;
-X11, other Linux file managers, and Linux RDP servers are not yet verified.
+Unicode text also passed in both directions with one Ubuntu xrdp/Xorg guest.
+X11 as a local client display, file clipboard on Linux RDP servers, and other
+Linux file managers are not yet verified.
 Clipboard images, rich text and HTML are not implemented.
 
 ## Transfer behavior and limits

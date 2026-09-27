@@ -70,6 +70,22 @@ recorded an SSL read I/O error but did not identify the cause. A fresh
 connection accepted a local-to-guest clipboard copy immediately. The tests do
 not establish sustained clipboard stability or a cause for the reset.
 
+Code review after this check found that handling a remote clipboard offer
+cleared the Wayland clipboard before the remote payload arrived. A local copy
+made in that interval could be lost. The worker now retains the current
+selection until remote data is ready and checks for a newer local selection
+before publishing.
+
+The change was tested against another fresh Ubuntu xrdp VM in a separate
+Wayland session. A local copy issued immediately after Fjern announced the
+clipboard channel reached the guest unchanged. On a fresh connection, a guest
+copy reached the local clipboard, a subsequent local copy reached the guest,
+and another guest copy reached the local clipboard. One attempted guest copy
+from a shell background job installed an empty X11 selection and left a format
+request unanswered; a clean connection and a verified X11 selection were used
+for the successful direction checks. This check does not explain the earlier
+long-session connection reset.
+
 With `FJERN_STATS=1`, the reconnect showed zero paint attempts per second while
 idle and approximately 45.9 MiB RSS. An xterm updated every 50 ms produced
 approximately 20 new paints per second; the highest reported paint time in the

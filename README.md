@@ -121,7 +121,8 @@ explicitly approved certificate fingerprint. See [certificate trust](docs/tls.md
 | Authentication | Verified TLS with NTLM CredSSP/NLA or TLS-only Client Info login | VeNCrypt and classic VNC authentication |
 
 The [xrdp check](docs/linux-xrdp-first-probe.md) covers desktop display and
-dynamic resolution; RDP input and clipboard checks in this table were performed
+dynamic resolution, text entry with capitals and bidirectional Unicode text
+clipboard. Pointer and file clipboard checks in this table were performed
 against Windows.
 
 **Fits your desktop.** The terminal interface uses your terminal colors.

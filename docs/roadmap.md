@@ -74,7 +74,9 @@ and text entry also passed. International layouts and broader input compatibilit
 remain unverified.
 The [xrdp follow-up check](linux-xrdp-first-probe.md) passed TLS-only login,
 licensing, activation, bitmap display and dynamic resolution on Ubuntu 24.04.4
-with xrdp 0.9.24. Input and clipboard on xrdp remain unverified.
+with xrdp 0.9.24. A later isolated Wayland check verified text entry with
+capitals and Unicode text clipboard in both directions. Pointer input, file
+clipboard and sustained connection stability on xrdp remain unverified.
 Record server OS/version, client display system, authentication mode, resolution,
 codec and outcome for each future run.
 Loopback fixtures establish protocol behavior only, not server interoperability.

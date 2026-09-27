@@ -50,9 +50,13 @@ impl Native {
             while !s.load(Ordering::Relaxed) {
                 match commands.recv_timeout(Duration::from_millis(150)) {
                     Ok(Command::Begin(id)) => {
-                        let _ = copy::clear(copy::ClipboardType::Regular, copy::Seat::All);
-                        last = Some(Raw::Empty);
-                        begun = Some((id, Raw::Empty));
+                        // Keep the current selection until the remote data is ready. Clearing
+                        // here can erase a local copy made after the server's offer but before
+                        // this worker processes Begin. Use the last observed selection as the
+                        // baseline so a newer local copy also prevents remote publication.
+                        let baseline = last.clone().unwrap_or(Raw::Empty);
+                        last = Some(baseline.clone());
+                        begun = Some((id, baseline));
                     }
                     Ok(Command::Publish(id, published)) => {
                         if let Some((expected, baseline)) = &begun
