@@ -3,7 +3,8 @@
 Start with one Windows host, then add a Linux host. Keep normal RDP security
 settings enabled. Diagnostics cover negotiation, TLS and an experimental NTLM
 CredSSP login, plus MCS/GCC settings and channel setup. The `connect` command
-continues to a native desktop with basic input; Windows first display is verified.
+continues to a native desktop with basic input through NLA or TLS-only security;
+first display is verified on Windows and xrdp.
 
 ## Windows
 

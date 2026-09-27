@@ -44,8 +44,8 @@ All items below are planned unless explicitly marked complete.
 - [x] Return to the connection manager after disconnect or failure.
 - Concurrent connections; see [session design](sessions.md).
 - Validate against Windows RDP, xrdp and GNOME Remote Desktop.
-- Support TLS-only RDP sessions; the [first xrdp check](linux-xrdp-first-probe.md)
-  reaches verified TLS but stops before login because NLA was not selected.
+- [x] Support TLS-only RDP sessions on xrdp; the [xrdp follow-up check](linux-xrdp-first-probe.md)
+  reached an active desktop and confirmed dynamic resolution.
 - Test Danish/US keyboards, Wayland/X11, scaling and network interruption.
 
 ## 3 — Everyday use
@@ -72,6 +72,9 @@ Client Info, licensing, activation and first bitmap display also passed on this
 host through the native Wayland viewer. Basic keyboard shortcuts, mouse clicks
 and text entry also passed. International layouts and broader input compatibility
 remain unverified.
+The [xrdp follow-up check](linux-xrdp-first-probe.md) passed TLS-only login,
+licensing, activation, bitmap display and dynamic resolution on Ubuntu 24.04.4
+with xrdp 0.9.24. Input and clipboard on xrdp remain unverified.
 Record server OS/version, client display system, authentication mode, resolution,
 codec and outcome for each future run.
 Loopback fixtures establish protocol behavior only, not server interoperability.

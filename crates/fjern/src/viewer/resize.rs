@@ -72,6 +72,23 @@ impl Resize {
     pub fn waiting(&self) -> bool {
         self.pending.is_some()
     }
+    /// Accept bitmap updates at the requested size before a server reactivation.
+    /// xrdp can start sending the new size without a Demand Active PDU.
+    pub fn prepare_framebuffer(&mut self, desktop: &mut Session) -> Result<(), Error> {
+        let Some((target, _)) = self.pending else {
+            return Ok(());
+        };
+        // A timed-out request can be replaced in the same poll. Settle its
+        // framebuffer before beginning the next one.
+        desktop.finish_display_resize();
+        desktop.begin_display_resize(target.0, target.1)?;
+        Ok(())
+    }
+    pub fn finish_framebuffer(&mut self, desktop: &mut Session) {
+        if self.pending.is_none() {
+            desktop.finish_display_resize();
+        }
+    }
     pub fn receive(&mut self, b: &[u8], desktop: &mut Session) -> Result<Vec<Vec<u8>>, Error> {
         let mut out = Vec::new();
         if let Some(message) = self.wire.receive(b)? {

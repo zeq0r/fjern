@@ -18,8 +18,9 @@ explicit local account use `MACHINE\username`. NTLM-disabled hosts are unsupport
 
 ## Exchange
 
-1. Complete TLS with the selected trust policy. Reject TLS-only negotiation
-   before collecting credentials.
+1. Complete TLS with the selected trust policy. The CredSSP diagnostics reject
+   TLS-only negotiation before collecting credentials; interactive `connect`
+   uses a separate TLS-only Client Info path when the server selects it.
 2. For `login`, prompt for a password on the local terminal with echo disabled.
    No password argument, environment variable or saved-password file is used.
 3. Send the provider's Type 1 token in a version 6 TSRequest. It has no username,

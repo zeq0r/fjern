@@ -82,7 +82,7 @@ impl Session {
     }
     fn fastpath_update(&mut self, code: u8, body: &[u8]) -> Result<()> {
         match code {
-            1 => self.framebuffer.update(body)?,
+            1 => self.bitmap_update(body)?,
             3 => {
                 Cursor(body).end()?;
             }

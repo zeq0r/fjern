@@ -409,8 +409,10 @@ fn receive(
                 desired,
                 (state.framebuffer.width, state.framebuffer.height),
                 state.phase == Phase::Active,
-                state.framebuffer.updates > 0,
+                state.framebuffer.updates > 0
+                    && (state.display_resize_confirmed() || !resize.waiting()),
             )? {
+                resize.prepare_framebuffer(state)?;
                 if let Some(packet) = state.input(&[Input::ReleaseAll])? {
                     stream.write_plaintext(connection, &data::encode(&packet)?)?;
                 }
@@ -423,6 +425,7 @@ fn receive(
                     stream.write_plaintext(connection, &data::encode(&packet)?)?;
                 }
             }
+            resize.finish_framebuffer(state);
             shared.lock().unwrap().active =
                 state.phase == Phase::Active && state.framebuffer.updates > 0 && !resize.waiting();
         }

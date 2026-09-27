@@ -38,6 +38,36 @@ impl Damage {
     }
 }
 impl Framebuffer {
+    /// Check rectangle bounds before choosing a framebuffer during a resize.
+    pub(super) fn fits(&self, data: &[u8]) -> Result<bool> {
+        let mut r = Cursor(data);
+        match r.u16()? {
+            3 => {
+                r.take(2)?;
+                r.end()?;
+                return Ok(true);
+            }
+            1 => {}
+            _ => return Err(bad("unsupported bitmap update type")),
+        }
+        let count = r.u16()?;
+        if usize::from(count) > r.0.len() / 18 {
+            return Err(bad("invalid bitmap rectangle count"));
+        }
+        let mut fits = true;
+        for _ in 0..count {
+            let left = r.u16()?;
+            let top = r.u16()?;
+            let right = r.u16()?;
+            let bottom = r.u16()?;
+            r.take(8)?; // width, height, bpp, flags
+            let length = usize::from(r.u16()?);
+            r.take(length)?;
+            fits &= left <= right && top <= bottom && right < self.width && bottom < self.height;
+        }
+        r.end()?;
+        Ok(fits)
+    }
     pub(super) fn validate_size(width: u16, height: u16) -> Result<()> {
         if width == 0
             || height == 0
@@ -103,7 +133,10 @@ impl Framebuffer {
                 || right - left + 1 > width
                 || bottom - top + 1 > height
             {
-                return Err(bad("invalid bitmap rectangle bounds, flags or color depth"));
+                return Err(Error(format!(
+                    "invalid bitmap rectangle bounds, flags or color depth: ({left},{top})-({right},{bottom}), bitmap {width}x{height}, bpp {bpp}, flags {flags:#x}, desktop {}x{}",
+                    self.width, self.height
+                )));
             }
             let compressed = flags & 1 != 0;
             self.damage.mark(top as usize, bottom as usize + 1);

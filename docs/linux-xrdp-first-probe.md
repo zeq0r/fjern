@@ -11,9 +11,24 @@ test account were removed after the check.
 | `fjern connect` | Stopped before login: `server selected TLS-only security; NLA was not negotiated`. |
 | FreeRDP 3 with TLS security and the same test account | Authenticated; xrdp-sesman logged a successfully started Xorg session and XFCE ran. |
 
-This establishes a client compatibility gap for the tested xrdp configuration:
-Fjern's interactive path currently requires NLA even when negotiation selects
-TLS-only security. Implement a TLS-only session path after certificate validation,
-then repeat the desktop, input, resize and clipboard checks on xrdp. Keep the
-existing NLA path for servers that select it. This check does not establish GNOME
-Remote Desktop compatibility.
+At that commit, Fjern's interactive path required NLA even when negotiation
+selected TLS-only security. This motivated the TLS-only session path tested
+below. The first check did not establish GNOME Remote Desktop compatibility.
+
+## Follow-up implementation check
+
+Later the same day, a fresh VM with the same Ubuntu, xrdp, xorgxrdp and XFCE
+versions was used to verify the TLS-only connection path. The xrdp service had
+read access to its private key and selected TLS 1.3. Fjern sent credentials in
+Client Info inside the verified TLS stream, completed xrdp's licensing exchange,
+activated the desktop and displayed remote bitmaps. The xrdp session manager
+confirmed a successful Xorg login for the test account.
+
+Two consecutive 20-second connections with dynamic resolution enabled displayed
+the first bitmap, confirmed the remote resize and remained connected until the
+test client was deliberately terminated. The guest's Xorg display reported
+960×1056 after the resize. A separate run with dynamic resolution disabled also
+remained connected. The resize handling retains the old framebuffer while the
+server may still send old-size bitmaps, and accepts new-size bitmaps before a
+Demand Active PDU. Keyboard, pointer and clipboard behavior on xrdp have not yet
+been verified. The follow-up VM and its test account were removed.

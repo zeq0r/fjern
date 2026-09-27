@@ -368,13 +368,22 @@ fn run_with_tls_hook(
                         after_tls()?;
                     }
                     if options.nla {
-                        let identity = nla::run(
-                            &mut connection,
-                            &mut stream,
-                            host,
-                            response.protocol,
-                            options.user.as_deref(),
-                        )?;
+                        let identity = if response.protocol
+                            == linrdp_proto::negotiation::SecurityProtocol::Tls
+                            && options.view
+                        {
+                            Some(nla::prompt_identity(
+                                options.user.as_deref().ok_or("connect requires --user")?,
+                            )?)
+                        } else {
+                            nla::run(
+                                &mut connection,
+                                &mut stream,
+                                host,
+                                response.protocol,
+                                options.user.as_deref(),
+                            )?
+                        };
                         if options.view {
                             viewer::run(
                                 &mut connection,

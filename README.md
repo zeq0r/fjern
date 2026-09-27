@@ -21,7 +21,7 @@ Choose a saved connection in the keyboard-first terminal interface, or connect
 directly from your shell. Resize the window, forward your shortcuts, and copy
 between local and remote applications.
 
-Built and tested on Hyprland with Windows RDP and WayVNC hosts. Fjern is an
+Built and tested on Hyprland with Windows RDP, Ubuntu xrdp and WayVNC hosts. Fjern is an
 independent client with no desktop-distribution dependency. **Early development:**
 the working paths and remaining gaps are recorded in the
 [platform validation report](docs/platform-validation.md).
@@ -113,12 +113,16 @@ explicitly approved certificate fingerprint. See [certificate trust](docs/tls.md
 
 | | RDP | VNC |
 |---|---|---|
-| Tested host | Windows | WayVNC |
+| Tested host | Windows and Ubuntu xrdp | WayVNC |
 | Display | Native window, dynamic resolution, local scaling | Native window, server resize requests, local scaling |
 | Input | Keyboard, pointer, wheel, shortcut capture | Keyboard, pointer, wheel, shortcut capture |
 | Clipboard | Text, files and directories | Text |
 | Graphics | Bitmap by default; experimental H.264/AVC420 | ZRLE, Raw and CopyRect |
-| Authentication | TLS and NTLM CredSSP/NLA | VeNCrypt and classic VNC authentication |
+| Authentication | Verified TLS with NTLM CredSSP/NLA or TLS-only Client Info login | VeNCrypt and classic VNC authentication |
+
+The [xrdp check](docs/linux-xrdp-first-probe.md) covers desktop display and
+dynamic resolution; RDP input and clipboard checks in this table were performed
+against Windows.
 
 **Fits your desktop.** The terminal interface uses your terminal colors.
 Remote windows tile and resize with the compositor. Clipboard integration is

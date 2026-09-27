@@ -29,27 +29,26 @@ pub fn run(
     if protocol == SecurityProtocol::Tls {
         return Err("server selected TLS-only security; NLA was not negotiated".into());
     }
-    let identity = if let Some(value) = user {
-        let (domain, user) = account(value)?;
-        let username = Username::new(
-            user,
-            if domain.is_empty() {
-                None
-            } else {
-                Some(domain)
-            },
-        )?;
-        let password =
-            sspi::Secret::new(rpassword::prompt_password("Windows password (hidden): ")?);
-        if password.as_ref().len() > 65536 || password.as_ref().contains('\0') {
-            return Err("invalid or oversized password".into());
-        }
-        Some(AuthIdentity { username, password })
-    } else {
-        None
-    };
+    let identity = user.map(prompt_identity).transpose()?;
     exchange(connection, stream, host, protocol, user, identity.as_ref())?;
     Ok(identity)
+}
+
+pub fn prompt_identity(value: &str) -> Result<AuthIdentity, Error> {
+    let (domain, user) = account(value)?;
+    let username = Username::new(
+        user,
+        if domain.is_empty() {
+            None
+        } else {
+            Some(domain)
+        },
+    )?;
+    let password = sspi::Secret::new(rpassword::prompt_password("RDP password (hidden): ")?);
+    if password.as_ref().len() > 65536 || password.as_ref().contains('\0') {
+        return Err("invalid or oversized password".into());
+    }
+    Ok(AuthIdentity { username, password })
 }
 
 fn exchange(

@@ -1,6 +1,12 @@
 //! First-desktop RDP profile (MS-RDPBCGR).
-//! Enhanced security, valid-client licensing, bitmap output, no drawing orders.
+//! Enhanced security, bounded licensing, bitmap output, no drawing orders.
+use ironrdp_core::{decode, encode_vec};
+use ironrdp_pdu::rdp::server_license::{
+    ClientNewLicenseRequest, ClientPlatformChallengeResponse, LicenseEncryptionData, LicensePdu,
+};
+use ring::rand::{SecureRandom, SystemRandom};
 use std::fmt;
+use zeroize::Zeroize;
 
 mod bitmap;
 mod capabilities;
@@ -109,6 +115,18 @@ pub struct Session {
     pub revision: u64,
     refresh_supported: bool,
     pub notifications: Vec<String>,
+    license_username: String,
+    license_keys: Option<LicenseKeys>,
+    resize_fallback: Option<Framebuffer>,
+    resize_confirmed: bool,
+}
+struct LicenseKeys(LicenseEncryptionData);
+impl Drop for LicenseKeys {
+    fn drop(&mut self) {
+        self.0.premaster_secret.zeroize();
+        self.0.mac_salt_key.zeroize();
+        self.0.license_key.zeroize();
+    }
 }
 impl Session {
     pub fn new(user: u16, channel: u16) -> Result<Self> {
@@ -131,17 +149,60 @@ impl Session {
             revision: 0,
             refresh_supported: false,
             notifications: Vec::new(),
+            license_username: String::new(),
+            license_keys: None,
+            resize_fallback: None,
+            resize_confirmed: false,
         })
     }
 
-    /// Client Info travels only inside the previously authenticated TLS stream.
+    pub fn begin_display_resize(&mut self, width: u16, height: u16) -> Result<()> {
+        if self.resize_fallback.is_some() {
+            return Err(bad("overlapping display resize"));
+        }
+        let next = Framebuffer::new(width, height)?;
+        self.resize_fallback = Some(std::mem::replace(&mut self.framebuffer, next));
+        self.resize_confirmed = false;
+        self.revision = self.revision.saturating_add(1);
+        Ok(())
+    }
+
+    pub fn display_resize_confirmed(&self) -> bool {
+        self.resize_confirmed
+    }
+
+    pub fn finish_display_resize(&mut self) {
+        if let Some(previous) = self.resize_fallback.take() {
+            if !self.resize_confirmed {
+                self.framebuffer = previous;
+                self.revision = self.revision.saturating_add(1);
+            }
+        }
+    }
+
+    fn bitmap_update(&mut self, data: &[u8]) -> Result<()> {
+        if let Some(previous) = self.resize_fallback.as_mut() {
+            let fits_new = self.framebuffer.fits(data)?;
+            let fits_old = previous.fits(data)?;
+            if !fits_new && fits_old {
+                return previous.update(data);
+            }
+            if fits_new && !fits_old {
+                self.resize_confirmed = true;
+            }
+        }
+        self.framebuffer.update(data)
+    }
+
+    /// Client Info travels only inside the previously verified TLS stream.
     pub fn client_info(
-        &self,
+        &mut self,
         domain: &str,
         username: &str,
         password: &str,
         address: std::net::IpAddr,
     ) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+        let license_username = username.to_owned();
         let domain = utf16(domain, 50)?;
         let username = utf16(username, 512)?;
         let password = zeroize::Zeroizing::new(utf16(password, 512)?);
@@ -173,7 +234,80 @@ impl Session {
         // TS_PERF_ENABLE_FONT_SMOOTHING | TS_PERF_ENABLE_DESKTOP_COMPOSITION.
         u32le(&mut b, 0x0000_0180);
         u16le(&mut b, 0);
-        self.send(&b).map(zeroize::Zeroizing::new)
+        let packet = self.send(&b)?;
+        self.license_username = license_username;
+        Ok(zeroize::Zeroizing::new(packet))
+    }
+
+    fn receive_license(&mut self, data: &[u8]) -> Result<Vec<Vec<u8>>> {
+        if data.get(4) == Some(&0xff) {
+            license_valid_client(data)?;
+            self.license_keys = None;
+            self.phase = Phase::DemandActive;
+            return Ok(Vec::new());
+        }
+        let pdu: LicensePdu =
+            decode(data).map_err(|e| Error(format!("invalid licensing PDU: {e}")))?;
+        let response = match pdu {
+            LicensePdu::ServerLicenseRequest(request) if self.license_keys.is_none() => {
+                if self.license_username.is_empty() {
+                    return Err(bad("Client Info must precede licensing"));
+                }
+                let mut client_random = [0u8; 32];
+                let mut premaster = zeroize::Zeroizing::new([0u8; 48]);
+                let rng = SystemRandom::new();
+                rng.fill(&mut client_random)
+                    .map_err(|_| bad("licensing random generation failed"))?;
+                rng.fill(&mut *premaster)
+                    .map_err(|_| bad("licensing random generation failed"))?;
+                let (reply, keys) = ClientNewLicenseRequest::from_server_license_request(
+                    &request,
+                    &client_random,
+                    &premaster[..],
+                    &self.license_username,
+                    "Fjern",
+                )
+                .map_err(|e| Error(format!("licensing request failed: {e}")))?;
+                self.license_keys = Some(LicenseKeys(keys));
+                LicensePdu::from(reply)
+            }
+            LicensePdu::ServerPlatformChallenge(challenge) => {
+                let keys = self
+                    .license_keys
+                    .as_ref()
+                    .ok_or_else(|| bad("licensing challenge without request"))?;
+                let mut hardware = [0u8; 16];
+                SystemRandom::new()
+                    .fill(&mut hardware)
+                    .map_err(|_| bad("licensing random generation failed"))?;
+                let mut parts = [0u32; 4];
+                for (part, bytes) in parts.iter_mut().zip(hardware.chunks_exact(4)) {
+                    *part = u32::from_le_bytes(bytes.try_into().unwrap());
+                }
+                LicensePdu::from(
+                    ClientPlatformChallengeResponse::from_server_platform_challenge(
+                        &challenge, parts, &keys.0,
+                    )
+                    .map_err(|e| Error(format!("licensing challenge failed: {e}")))?,
+                )
+            }
+            LicensePdu::ServerUpgradeLicense(license) => {
+                let keys = self
+                    .license_keys
+                    .as_ref()
+                    .ok_or_else(|| bad("server license without request"))?;
+                license
+                    .verify_server_license(&keys.0)
+                    .map_err(|e| Error(format!("server license verification failed: {e}")))?;
+                self.license_keys = None;
+                self.phase = Phase::DemandActive;
+                return Ok(Vec::new());
+            }
+            _ => return Err(bad("unexpected licensing message")),
+        };
+        let encoded =
+            encode_vec(&response).map_err(|e| Error(format!("licensing encode failed: {e}")))?;
+        Ok(vec![self.send(&encoded)?])
     }
 
     /// Decode one complete MCS SendDataIndication and return outbound MCS PDUs.
@@ -186,9 +320,7 @@ impl Session {
             return Err(bad("unexpected MCS channel"));
         }
         if self.phase == Phase::Licensing {
-            license_valid_client(data)?;
-            self.phase = Phase::DemandActive;
-            return Ok(Vec::new());
+            return self.receive_license(data);
         }
         let mut r = Cursor(data);
         let mut replies = Vec::new();
@@ -213,6 +345,9 @@ impl Session {
                     self.server = source;
                     self.refresh_supported = demand.refresh;
                     self.framebuffer = Framebuffer::new(demand.width, demand.height)?;
+                    if self.resize_fallback.is_some() {
+                        self.resize_confirmed = true;
+                    }
                     self.held = input::Held::default();
                     self.fragment = None;
                     self.pointer = pointer::Pointer::default();
@@ -271,8 +406,14 @@ impl Session {
         r.take(2)?; // padding, stream priority
         r.u16()?; // uncompressedLength is unreliable on some Windows control PDUs
         let kind = r.byte()?;
-        if r.byte()? != 0 || r.u16()? != 0 {
-            return Err(bad("server sent unnegotiated bulk compression"));
+        let compression = r.byte()?;
+        let _compressed_length = r.u16()?;
+        // xrdp fills compressedLength with the PDU length even when ctype is zero.
+        // The outer MCS and Share Control lengths already bound the payload.
+        if compression != 0 {
+            return Err(Error(format!(
+                "server sent unnegotiated bulk compression: flags {compression:#x}"
+            )));
         }
         // Set Error Info and Monitor Layout explicitly require a zero source.
         if source != self.server && !(matches!(kind, 47 | 55) && source == 0) {
@@ -341,7 +482,7 @@ impl Session {
                 self.phase = Phase::Active;
             }
             2 if self.phase == Phase::Active => {
-                self.framebuffer.update(r.0)?;
+                self.bitmap_update(r.0)?;
                 self.revision = self.revision.saturating_add(1);
             }
             47 => {
@@ -475,8 +616,9 @@ fn license_valid_client(data: &[u8]) -> Result<()> {
         return Err(bad("invalid licensing security header"));
     }
     let kind = r.byte()?;
-    if r.byte()? & 15 != 3 {
-        return Err(bad("unsupported licensing version"));
+    let version = r.byte()? & 15;
+    if !matches!(version, 2 | 3) {
+        return Err(Error(format!("unsupported licensing version {version}")));
     }
     let size = usize::from(r.u16()?);
     if size != data.len() - 4 {
@@ -494,10 +636,11 @@ fn license_valid_client(data: &[u8]) -> Result<()> {
             "server licensing denied: code {code:#x}, transition {transition}"
         )));
     }
-    if r.u16()? != 4 {
+    let blob_type = r.u16()?;
+    let len = usize::from(r.u16()?);
+    if len != 0 && blob_type != 4 {
         return Err(bad("invalid licensing error blob"));
     }
-    let len = usize::from(r.u16()?);
     r.take(len)?;
     r.end()
 }
@@ -641,6 +784,10 @@ mod tests {
         let mut bad_license = license;
         bad_license[8] = 8;
         assert!(license_valid_client(&bad_license).is_err());
+        let mut xrdp_license = license;
+        xrdp_license[5] = 2;
+        xrdp_license[16..18].copy_from_slice(&0x1428u16.to_le_bytes());
+        license_valid_client(&xrdp_license).unwrap();
         let d = demand();
         for end in 0..d.len() {
             assert!(licensed().receive(&d[..end]).is_err());
@@ -648,6 +795,42 @@ mod tests {
         let mut wrong = d.clone();
         wrong[4] ^= 1;
         assert!(licensed().receive(&wrong).is_err());
+    }
+    #[test]
+    fn display_resize_keeps_old_bitmap_bounds_until_new_size_arrives() {
+        fn pixel(left: u16, top: u16) -> Vec<u8> {
+            let mut p = vec![1, 0, 1, 0]; // BITMAP update, one rectangle
+            for value in [left, top, left, top, 1, 1, 32, 0, 4] {
+                p.extend(value.to_le_bytes());
+            }
+            p.extend([0, 0, 255, 0]);
+            p
+        }
+        let mut session = Session::new(1004, 1003).unwrap();
+        session.framebuffer = Framebuffer::new(4, 4).unwrap();
+        session.begin_display_resize(2, 6).unwrap();
+        session.bitmap_update(&pixel(3, 0)).unwrap();
+        assert_eq!(session.framebuffer.updates, 0);
+        assert!(!session.display_resize_confirmed());
+        assert_eq!(
+            session.resize_fallback.as_ref().unwrap().pixels[3],
+            0xff0000
+        );
+        session.bitmap_update(&pixel(1, 5)).unwrap();
+        assert!(session.display_resize_confirmed());
+        session.finish_display_resize();
+        assert_eq!(
+            (session.framebuffer.width, session.framebuffer.height),
+            (2, 6)
+        );
+        assert_eq!(session.framebuffer.pixels[11], 0xff0000);
+
+        session.begin_display_resize(4, 4).unwrap();
+        session.finish_display_resize();
+        assert_eq!(
+            (session.framebuffer.width, session.framebuffer.height),
+            (2, 6)
+        );
     }
     #[test]
     fn raw_bitmap_orientation_color_and_padding() {
@@ -687,7 +870,7 @@ mod tests {
     }
     #[test]
     fn client_info_is_bounded_and_uses_zeroizing_storage() {
-        let s = Session::new(1004, 1003).unwrap();
+        let mut s = Session::new(1004, 1003).unwrap();
         let info = s
             .client_info("D", "U", "P", "127.0.0.1".parse().unwrap())
             .unwrap();
