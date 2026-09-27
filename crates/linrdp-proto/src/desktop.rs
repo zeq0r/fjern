@@ -172,11 +172,11 @@ impl Session {
     }
 
     pub fn finish_display_resize(&mut self) {
-        if let Some(previous) = self.resize_fallback.take() {
-            if !self.resize_confirmed {
-                self.framebuffer = previous;
-                self.revision = self.revision.saturating_add(1);
-            }
+        if let Some(previous) = self.resize_fallback.take()
+            && !self.resize_confirmed
+        {
+            self.framebuffer = previous;
+            self.revision = self.revision.saturating_add(1);
         }
     }
 
@@ -281,8 +281,8 @@ impl Session {
                     .fill(&mut hardware)
                     .map_err(|_| bad("licensing random generation failed"))?;
                 let mut parts = [0u32; 4];
-                for (part, bytes) in parts.iter_mut().zip(hardware.chunks_exact(4)) {
-                    *part = u32::from_le_bytes(bytes.try_into().unwrap());
+                for (part, bytes) in parts.iter_mut().zip(hardware.as_chunks::<4>().0) {
+                    *part = u32::from_le_bytes(*bytes);
                 }
                 LicensePdu::from(
                     ClientPlatformChallengeResponse::from_server_platform_challenge(
