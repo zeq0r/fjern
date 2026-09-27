@@ -63,8 +63,11 @@ cases, rather than assuming all Linux RDP hosts have identical behavior.
 3. Client information, valid-client licensing, capabilities and session activation: implemented.
 4. Bitmap display in one window: implemented and visually verified against Windows.
    Basic keyboard/pointer input forwarding and focus-loss releases are implemented.
-5. Manual reconnect is implemented in the connection manager; validate it
-   against real hosts before automatic reconnect or concurrent connections.
+5. Manual reconnect is implemented in the connection manager. On 2026-09-27,
+   it was verified against a Windows 11 VM: after closing the viewer, Ctrl+N
+   and Ctrl+R reopened the saved connection and displayed the desktop again,
+   even with an invalid unsaved hostname in the new-connection form.
+   Automatic reconnect and concurrent connections still need separate work.
 
 Authentication and early authorization have passed on a Windows test host.
 Basic settings, channel setup, Client Info, licensing, activation and first
