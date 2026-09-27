@@ -576,6 +576,8 @@ pub struct Window {
     xkb_context: *mut xkb_ffi::xkb_context,
     xkb_keymap: *mut xkb_ffi::xkb_keymap,
     xkb_state: *mut xkb_ffi::xkb_state,
+    synthetic_shift: bool,
+    uppercase_key: Option<u32>,
 
     update_rate: UpdateRate,
     menu_counter: MenuHandle,
@@ -667,6 +669,8 @@ impl Window {
             xkb_context: context,
             xkb_keymap: std::ptr::null_mut(),
             xkb_state: std::ptr::null_mut(),
+            synthetic_shift: false,
+            uppercase_key: None,
 
             update_rate: UpdateRate::new(),
             menu_counter: MenuHandle(0),
@@ -922,6 +926,11 @@ impl Window {
 
             match event {
                 Event::Keymap { format, fd, size } => {
+                    let uppercase = self.uppercase_key.take().is_some();
+                    if self.synthetic_shift || uppercase {
+                        self.key_handler.set_key_state(Key::LeftShift, false);
+                        self.synthetic_shift = false;
+                    }
                     let keymap = Self::handle_keymap(self.xkb_context, format, fd, size).unwrap();
                     self.xkb_keymap = keymap;
                     self.xkb_state = unsafe { ffi_dispatch!(XKBH, xkb_state_new, keymap) };
@@ -931,6 +940,11 @@ impl Window {
                 }
                 Event::Leave { .. } => {
                     self.active = false;
+                    let uppercase = self.uppercase_key.take().is_some();
+                    if self.synthetic_shift || uppercase {
+                        self.key_handler.set_key_state(Key::LeftShift, false);
+                        self.synthetic_shift = false;
+                    }
                 }
                 Event::Key { key, state, .. } => {
                     if !self.xkb_state.is_null() {
@@ -940,6 +954,7 @@ impl Window {
                             key + KEY_XKB_OFFSET,
                             state,
                             &mut self.key_handler,
+                            &mut self.uppercase_key,
                         );
                     }
                 }
@@ -964,6 +979,12 @@ impl Window {
                                 group
                             )
                         };
+                        Self::sync_virtual_shift(
+                            self.xkb_keymap,
+                            mods_depressed | mods_latched,
+                            &mut self.key_handler,
+                            &mut self.synthetic_shift,
+                        );
                     }
                 }
                 _ => {}
@@ -1090,12 +1111,37 @@ impl Window {
         self.key_handler.update();
     }
 
+    fn sync_virtual_shift(
+        keymap: *mut xkb_ffi::xkb_keymap,
+        modifiers: u32,
+        key_handler: &mut KeyHandler,
+        synthetic_shift: &mut bool,
+    ) {
+        // Virtual keyboards may report Shift only in the modifier mask.
+        let index = unsafe {
+            ffi_dispatch!(XKBH, xkb_keymap_mod_get_index, keymap, b"Shift\0".as_ptr().cast())
+        };
+        let shifted = index < 32 && modifiers & (1u32 << index) != 0;
+        if shifted
+            && !*synthetic_shift
+            && !key_handler.get_keys().contains(&Key::LeftShift)
+            && !key_handler.get_keys().contains(&Key::RightShift)
+        {
+            key_handler.set_key_state(Key::LeftShift, true);
+            *synthetic_shift = true;
+        } else if !shifted && *synthetic_shift {
+            key_handler.set_key_state(Key::LeftShift, false);
+            *synthetic_shift = false;
+        }
+    }
+
     fn handle_key(
         keymap: *mut xkb_ffi::xkb_keymap,
         keymap_state: *mut xkb_ffi::xkb_state,
         key: u32,
         state: wl_keyboard::KeyState,
         key_handler: &mut KeyHandler,
+        uppercase_key: &mut Option<u32>,
     ) {
         let is_down = state == wl_keyboard::KeyState::Pressed;
         let key_xkb = unsafe { ffi_dispatch!(XKBH, xkb_state_key_get_one_sym, keymap_state, key) };
@@ -1122,6 +1168,10 @@ impl Window {
             if count != 1 || symbols.is_null() { return; }
             // The keymap owns this array and stays alive throughout handle_key.
             let base = unsafe { *symbols };
+            // Virtual keymaps can advertise capitals at base level without
+            // sending a Shift key or modifier event.
+            let uppercase = (0x41..=0x5a).contains(&base);
+            let base = if uppercase { base + 0x20 } else { base };
             let key_i = match base {
                 key::XKB_KEY_0 => Key::Key0,
                 key::XKB_KEY_1 => Key::Key1,
@@ -1237,7 +1287,20 @@ impl Window {
 
             // xkbcommon keycodes are Linux evdev codes plus 8. Expose the
             // original evdev code to consumers that need physical keys.
+            if uppercase
+                && is_down
+                && uppercase_key.is_none()
+                && !key_handler.get_keys().contains(&Key::LeftShift)
+                && !key_handler.get_keys().contains(&Key::RightShift)
+            {
+                key_handler.set_key_state(Key::LeftShift, true);
+                *uppercase_key = Some(key);
+            }
             key_handler.set_key_state_raw(key_i, is_down, key - KEY_XKB_OFFSET);
+            if !is_down && *uppercase_key == Some(key) {
+                key_handler.set_key_state(Key::LeftShift, false);
+                *uppercase_key = None;
+            }
         }
     }
 
@@ -1710,22 +1773,65 @@ mod fjern_keyboard_tests {
             assert!(!state.is_null());
             let events=Rc::new(RefCell::new(Vec::new()));
             let mut handler=KeyHandler::new();
+            let mut uppercase_key=None;
             handler.set_input_callback(Box::new(Capture(events.clone())));
             for (code, expected) in [(38,Key::A),(23,Key::Tab),(10,Key::Key1)] {
                 ffi_dispatch!(XKBH,xkb_state_update_mask,state,1,0,0,0,0,0);
-                Window::handle_key(map,state,code,wl_keyboard::KeyState::Pressed,&mut handler);
+                Window::handle_key(map,state,code,wl_keyboard::KeyState::Pressed,&mut handler,&mut uppercase_key);
                 // Releasing Shift before the ordinary key must not strand its down state.
                 ffi_dispatch!(XKBH,xkb_state_update_mask,state,0,0,0,0,0,0);
-                Window::handle_key(map,state,code,wl_keyboard::KeyState::Released,&mut handler);
+                Window::handle_key(map,state,code,wl_keyboard::KeyState::Released,&mut handler,&mut uppercase_key);
                 assert_eq!(&*events.borrow(), &[(expected,true),(expected,false)]);
                 assert!(handler.get_keys().is_empty());
                 events.borrow_mut().clear();
-                Window::handle_key(map,state,code,wl_keyboard::KeyState::Pressed,&mut handler);
+                Window::handle_key(map,state,code,wl_keyboard::KeyState::Pressed,&mut handler,&mut uppercase_key);
                 ffi_dispatch!(XKBH,xkb_state_update_mask,state,1,0,0,0,0,0);
-                Window::handle_key(map,state,code,wl_keyboard::KeyState::Released,&mut handler);
+                Window::handle_key(map,state,code,wl_keyboard::KeyState::Released,&mut handler,&mut uppercase_key);
                 assert_eq!(&*events.borrow(), &[(expected,true),(expected,false)]);
                 events.borrow_mut().clear();
             }
+            ffi_dispatch!(XKBH,xkb_state_unref,state);
+            ffi_dispatch!(XKBH,xkb_keymap_unref,map);
+            ffi_dispatch!(XKBH,xkb_context_unref,context);
+        }
+    }
+    #[test]
+    fn virtual_shift_mask_and_uppercase_base_emit_complete_key_chords() {
+        use xkb_ffi::*;
+        let source = std::ffi::CString::new(r#"xkb_keymap {
+            xkb_keycodes { minimum=8; maximum=255; <AC04>=41; <AB01>=52; };
+            xkb_types { type "TWO_LEVEL" { modifiers=Shift; map[Shift]=Level2; }; };
+            xkb_compatibility {};
+            xkb_symbols { key <AC04> { type="TWO_LEVEL", [f,F] }; key <AB01> { [F] }; };
+        };"#).unwrap();
+        unsafe {
+            let context=ffi_dispatch!(XKBH,xkb_context_new,xkb_context_flags::XKB_CONTEXT_NO_FLAGS);
+            assert!(!context.is_null());
+            let map=ffi_dispatch!(XKBH,xkb_keymap_new_from_string,context,source.as_ptr(),xkb_keymap_format::XKB_KEYMAP_FORMAT_TEXT_V1,xkb_keymap_compile_flags::XKB_KEYMAP_COMPILE_NO_FLAGS);
+            assert!(!map.is_null());
+            let state=ffi_dispatch!(XKBH,xkb_state_new,map);
+            assert!(!state.is_null());
+            let events=Rc::new(RefCell::new(Vec::new()));
+            let mut handler=KeyHandler::new();
+            handler.set_input_callback(Box::new(Capture(events.clone())));
+            let mut synthetic_shift=false;
+            let mut uppercase_key=None;
+            let index=ffi_dispatch!(XKBH,xkb_keymap_mod_get_index,map,b"Shift\0".as_ptr().cast());
+            assert!(index<32);
+            let mask=1u32<<index;
+            ffi_dispatch!(XKBH,xkb_state_update_mask,state,mask,0,0,0,0,0);
+            Window::sync_virtual_shift(map,mask,&mut handler,&mut synthetic_shift);
+            Window::handle_key(map,state,41,wl_keyboard::KeyState::Pressed,&mut handler,&mut uppercase_key);
+            Window::handle_key(map,state,41,wl_keyboard::KeyState::Released,&mut handler,&mut uppercase_key);
+            ffi_dispatch!(XKBH,xkb_state_update_mask,state,0,0,0,0,0,0);
+            Window::sync_virtual_shift(map,0,&mut handler,&mut synthetic_shift);
+            assert_eq!(&*events.borrow(), &[(Key::LeftShift,true),(Key::F,true),(Key::F,false),(Key::LeftShift,false)]);
+            assert!(handler.get_keys().is_empty());
+            events.borrow_mut().clear();
+            Window::handle_key(map,state,52,wl_keyboard::KeyState::Pressed,&mut handler,&mut uppercase_key);
+            Window::handle_key(map,state,52,wl_keyboard::KeyState::Released,&mut handler,&mut uppercase_key);
+            assert_eq!(&*events.borrow(), &[(Key::LeftShift,true),(Key::F,true),(Key::F,false),(Key::LeftShift,false)]);
+            assert!(handler.get_keys().is_empty());
             ffi_dispatch!(XKBH,xkb_state_unref,state);
             ffi_dispatch!(XKBH,xkb_keymap_unref,map);
             ffi_dispatch!(XKBH,xkb_context_unref,context);

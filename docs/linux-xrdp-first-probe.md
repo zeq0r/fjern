@@ -32,3 +32,15 @@ remained connected. The resize handling retains the old framebuffer while the
 server may still send old-size bitmaps, and accepts new-size bitmaps before a
 Demand Active PDU. Keyboard, pointer and clipboard behavior on xrdp have not yet
 been verified. The follow-up VM and its test account were removed.
+
+## Keyboard follow-up
+
+A third temporary VM with the same xrdp desktop accepted lowercase keys and an
+explicit Shift plus `F` chord through Fjern; both were confirmed by reading a
+test file written inside the guest. A Wayland virtual keyboard's text mode did
+not preserve capitals before a minifb backend fix. The backend now translates
+Shift-only modifier updates and uppercase base symbols into complete key-down
+and key-up sequences. A regression test using a real XKB keymap verifies both
+sequences and release state. The final backend change has not yet been retested
+end to end against xrdp. Clipboard behavior also remains unverified. The VM
+and test account were removed after the check.

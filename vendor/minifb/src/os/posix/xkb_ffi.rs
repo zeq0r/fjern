@@ -55,6 +55,7 @@ functions:
                                   xkb_keymap_compile_flags
                                  ) -> *mut xkb_keymap,
     fn xkb_keymap_unref(*mut xkb_keymap) -> (),
+    fn xkb_keymap_mod_get_index(*mut xkb_keymap, *const c_char) -> u32,
     fn xkb_state_key_get_one_sym(*mut xkb_state, xkb_keycode_t) -> xkb_keysym_t,
     fn xkb_state_key_get_layout(*mut xkb_state, xkb_keycode_t) -> xkb_layout_index_t,
     fn xkb_keymap_key_get_syms_by_level(*mut xkb_keymap, xkb_keycode_t, xkb_layout_index_t, u32, *mut *const xkb_keysym_t) -> i32,
