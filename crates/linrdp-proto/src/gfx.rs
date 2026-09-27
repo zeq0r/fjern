@@ -983,6 +983,59 @@ mod tests {
         );
     }
     #[test]
+    fn recycled_graphics_buffers_match_full_composition_with_moving_surfaces() {
+        let mut g = Gfx::new();
+        g.dimensions = Some((8, 8));
+        for (id, width, height) in [(1, 8, 8), (2, 4, 4)] {
+            g.surfaces.insert(
+                id,
+                Surface {
+                    buffer: Framebuffer::new(width, height).unwrap(),
+                    origin: Some((0, 0)),
+                    progressive: ProgressiveDecoder::new(),
+                    contexts: Default::default(),
+                },
+            );
+        }
+        let mut recycled = [
+            Framebuffer::new(8, 8).unwrap(),
+            Framebuffer::new(8, 8).unwrap(),
+        ];
+        let mut seed = 0x125a_4c3du32;
+        for frame in 0..200 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let id = if seed & 1 == 0 { 1 } else { 2 };
+            let surface = g.surface_mut(id).unwrap();
+            let row = (seed as usize >> 4) % surface.buffer.height as usize;
+            let width = surface.buffer.width as usize;
+            let color = seed & 0xffffff;
+            surface.buffer.pixels[row * width..(row + 1) * width].fill(color);
+            surface.buffer.damage.mark(row, row + 1);
+            if frame % 13 == 0 {
+                let offset = frame % 5;
+                g.surface_mut(2).unwrap().origin = Some((offset, 4 - offset));
+            }
+            if frame % 29 == 0 {
+                g.surface_mut(2).unwrap().origin = None;
+            }
+            g.present().unwrap();
+            let mut expected = vec![0; 64];
+            for surface in g.surfaces.values() {
+                if let Some((x, y)) = surface.origin {
+                    for row in 0..surface.buffer.height as usize {
+                        let src = row * surface.buffer.width as usize;
+                        let dst = (y + row) * 8 + x;
+                        expected[dst..dst + surface.buffer.width as usize].copy_from_slice(
+                            &surface.buffer.pixels[src..src + surface.buffer.width as usize],
+                        );
+                    }
+                }
+            }
+            assert_eq!(g.output.as_ref().unwrap().pixels, expected, "frame {frame}");
+            std::mem::swap(g.output.as_mut().unwrap(), &mut recycled[frame % 2]);
+        }
+    }
+    #[test]
     fn fragmented_and_concatenated_pdus() {
         let mut g = setup();
         let a = pdu(0xb, &[0, 0, 0, 0, 7, 0, 0, 0]);
