@@ -21,7 +21,12 @@ def parse(text):
             raise ValueError("incomplete Fjern stats line")
         try:
             row = {key: float(values[key]) for key in needed}
-            for key in ("paint-max-ms", "snapshot-wait-max-ms", "input-queue-max-ms", "event-max-ms"):
+            for key in (
+                "published/s", "replaced/s", "published-row-changes/s",
+                "picked/s", "paint-new/s", "paint-row-changes/s",
+                "paint-max-ms", "snapshot-wait-max-ms", "input-queue-max-ms",
+                "event-max-ms",
+            ):
                 if key in values:
                     row[key] = float(values[key])
         except ValueError as error:
@@ -44,6 +49,17 @@ def summarize(rows):
         "mean_paint_attempts_per_second": sum(row["paint-attempts/s"] for row in values) / count,
         "peak_rss_mib": max(row["rss-mib"] for row in values),
     }
+    for field, label in (
+        ("published/s", "mean_published_per_second"),
+        ("replaced/s", "mean_replaced_per_second"),
+        ("published-row-changes/s", "mean_published_row_changes_per_second"),
+        ("picked/s", "mean_picked_per_second"),
+        ("paint-new/s", "mean_paint_new_per_second"),
+        ("paint-row-changes/s", "mean_paint_row_changes_per_second"),
+    ):
+        present = [row[field] for row in values if field in row]
+        if present:
+            report[label] = sum(present) / len(present)
     for field, label in (
         ("paint-max-ms", "max_paint_ms"),
         ("snapshot-wait-max-ms", "max_snapshot_wait_ms"),

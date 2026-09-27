@@ -26,6 +26,20 @@ RDP stats: updates/s=20.0 paint-attempts/s=12.0 paint-max-ms=4.0 snapshot-wait-m
         with self.assertRaisesRegex(ValueError, "incomplete"):
             parse("VNC stats: updates/s=1")
 
+    def test_rdp_handoff_counts_are_summarized(self):
+        rows = parse(
+            "RDP stats: updates/s=100 published/s=60 replaced/s=4 "
+            "published-row-changes/s=58 picked/s=56 paint-attempts/s=55 "
+            "paint-new/s=54 paint-row-changes/s=51 rss-mib=40"
+        )
+        report = summarize(rows)
+        self.assertEqual(report["mean_published_per_second"], 60)
+        self.assertEqual(report["mean_replaced_per_second"], 4)
+        self.assertEqual(report["mean_published_row_changes_per_second"], 58)
+        self.assertEqual(report["mean_picked_per_second"], 56)
+        self.assertEqual(report["mean_paint_new_per_second"], 54)
+        self.assertEqual(report["mean_paint_row_changes_per_second"], 51)
+
     def test_vnc_event_max_is_reported_separately(self):
         rows = parse("VNC stats: updates/s=59.3 paint-attempts/s=3.5 "
                      "event-max-ms=2.2 scale-ms=40.0 raw-pending=false rss-mib=42.0")

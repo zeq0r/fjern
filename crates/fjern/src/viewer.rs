@@ -36,6 +36,10 @@ struct Display {
     window_size: (usize, usize),
     remote_updates: u64,
     published_at: Option<Instant>,
+    stats_enabled: bool,
+    stats_replaced: u64,
+    stats_row_changes: u64,
+    stats_row: Vec<u32>,
 }
 struct InputBatch {
     epoch: u64,
@@ -100,6 +104,7 @@ pub fn run(
     )?;
     // Poll input at 120 Hz; unchanged desktops do not submit pixel buffers.
     window.set_target_fps(120);
+    let stats_enabled = crate::metrics::enabled();
     let shared = Mutex::new(Display {
         width: initial_width,
         height: initial_height,
@@ -113,6 +118,10 @@ pub fn run(
         window_size: (initial_width, initial_height),
         remote_updates: 0,
         published_at: None,
+        stats_enabled,
+        stats_replaced: 0,
+        stats_row_changes: 0,
+        stats_row: Vec::new(),
     });
     let stop = AtomicBool::new(false);
     let shutdown = stream.try_clone()?;
@@ -162,11 +171,20 @@ pub fn run(
             let mut rendered_remote = (0, 0);
             let mut base_title = "Fjern — Connecting".to_owned();
             let mut shown_title = base_title.clone();
-            let stats_enabled = crate::metrics::enabled();
             let mut stats_since = Instant::now();
             let mut stats_updates = 0;
             let mut last_remote_updates = 0;
+            let mut stats_published = 0u64;
+            let mut last_published = 0u64;
+            let mut stats_replaced = 0u64;
+            let mut last_replaced = 0u64;
+            let mut stats_published_row_changes = 0u64;
+            let mut last_published_row_changes = 0u64;
+            let mut stats_picked = 0u64;
             let mut stats_paints = 0u64;
+            let mut stats_new_paints = 0u64;
+            let mut stats_paint_row_changes = 0u64;
+            let mut last_paint_row = Vec::new();
             let mut stats_paint_max = Duration::ZERO;
             let mut stats_queue_max = Duration::ZERO;
             while window.is_open() {
@@ -189,6 +207,7 @@ pub fn run(
                             stats_queue_max = stats_queue_max.max(published_at.elapsed());
                         }
                         frame.take_pixels(&mut pixels);
+                        stats_picked += 1;
                         width = frame.width;
                         height = frame.height;
                         revision = frame.revision;
@@ -202,6 +221,14 @@ pub fn run(
                         frame.remote_updates - last_remote_updates
                     };
                     last_remote_updates = frame.remote_updates;
+                    stats_published += frame.revision.saturating_sub(last_published);
+                    last_published = frame.revision;
+                    stats_replaced += frame.stats_replaced.saturating_sub(last_replaced);
+                    last_replaced = frame.stats_replaced;
+                    stats_published_row_changes += frame
+                        .stats_row_changes
+                        .saturating_sub(last_published_row_changes);
+                    last_published_row_changes = frame.stats_row_changes;
                     ready = frame.active && revision != 0;
                 }
                 let transfer = transfer_status
@@ -256,6 +283,21 @@ pub fn run(
                         window.update_with_buffer(&rendered, size.0, size.1)?;
                     }
                     stats_paints += 1;
+                    stats_new_paints += u64::from(rendered_revision != revision);
+                    if stats_enabled {
+                        let buffer = if size == (width, height) {
+                            &pixels.pixels
+                        } else {
+                            &rendered
+                        };
+                        if let Some(row) = presentation::center_row(buffer, size.0, size.1)
+                            && last_paint_row != row
+                        {
+                            last_paint_row.clear();
+                            last_paint_row.extend_from_slice(row);
+                            stats_paint_row_changes += 1;
+                        }
+                    }
                     stats_paint_max = stats_paint_max.max(paint_started.elapsed());
                     rendered_size = size;
                     rendered_remote = (width, height);
@@ -295,9 +337,15 @@ pub fn run(
                 if stats_enabled && stats_since.elapsed() >= Duration::from_secs(2) {
                     let seconds = stats_since.elapsed().as_secs_f64();
                     eprintln!(
-                        "RDP stats: updates/s={:.1} paint-attempts/s={:.1} paint-max-ms={:.2} snapshot-wait-max-ms={:.2} input-queue-max-ms={:.2} rss-mib={:.1}",
+                        "RDP stats: updates/s={:.1} published/s={:.1} replaced/s={:.1} published-row-changes/s={:.1} picked/s={:.1} paint-attempts/s={:.1} paint-new/s={:.1} paint-row-changes/s={:.1} paint-max-ms={:.2} snapshot-wait-max-ms={:.2} input-queue-max-ms={:.2} rss-mib={:.1}",
                         stats_updates as f64 / seconds,
+                        stats_published as f64 / seconds,
+                        stats_replaced as f64 / seconds,
+                        stats_published_row_changes as f64 / seconds,
+                        stats_picked as f64 / seconds,
                         stats_paints as f64 / seconds,
+                        stats_new_paints as f64 / seconds,
+                        stats_paint_row_changes as f64 / seconds,
                         stats_paint_max.as_secs_f64() * 1000.0,
                         stats_queue_max.as_secs_f64() * 1000.0,
                         input_queue_max.swap(0, Ordering::Relaxed) as f64 / 1_000_000.0,
@@ -305,7 +353,13 @@ pub fn run(
                     );
                     stats_since = Instant::now();
                     stats_updates = 0;
+                    stats_published = 0;
+                    stats_replaced = 0;
+                    stats_published_row_changes = 0;
+                    stats_picked = 0;
                     stats_paints = 0;
+                    stats_new_paints = 0;
+                    stats_paint_row_changes = 0;
                     stats_paint_max = Duration::ZERO;
                     stats_queue_max = Duration::ZERO;
                 }

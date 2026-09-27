@@ -51,6 +51,11 @@ impl Display {
     }
 }
 
+pub(super) fn center_row(pixels: &[u32], width: usize, height: usize) -> Option<&[u32]> {
+    let start = width.checked_mul(height / 2)?;
+    pixels.get(start..start.checked_add(width)?)
+}
+
 pub(super) fn publish(
     state: &Session,
     shared: &Mutex<Display>,
@@ -67,6 +72,21 @@ pub(super) fn publish(
     // any unconsumed snapshot atomically with the latest eligible image.
     state.update_snapshot(staging);
     let mut frame = shared.lock().unwrap();
+    if frame.pending {
+        frame.stats_replaced += 1;
+    }
+    if frame.stats_enabled
+        && let Some(row) = center_row(
+            &staging.pixels,
+            usize::from(state.framebuffer.width),
+            usize::from(state.framebuffer.height),
+        )
+        && frame.stats_row != row
+    {
+        frame.stats_row.clear();
+        frame.stats_row.extend_from_slice(row);
+        frame.stats_row_changes += 1;
+    }
     frame.width = usize::from(state.framebuffer.width);
     frame.height = usize::from(state.framebuffer.height);
     std::mem::swap(&mut frame.pixels, staging);
@@ -229,6 +249,7 @@ mod tests {
                 shared.lock().unwrap().take_pixels(&mut output);
             }
         }
+        assert_eq!(shared.lock().unwrap().stats_replaced, 1008);
         snapshots += usize::from(publish(&state, &shared, &mut staging, &mut updates, true));
         shared.lock().unwrap().take_pixels(&mut output);
         assert_eq!(output.pixels, state.framebuffer.pixels);

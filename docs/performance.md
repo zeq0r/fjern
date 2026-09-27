@@ -11,6 +11,15 @@ client-side segments, not input-to-display latency. VNC reports its longest
 event batch and total scaling time per interval. `FJERN_VNC_STATS=1` remains an
 alias for VNC diagnostics.
 
+RDP additionally reports `published/s` snapshots created by the receiver,
+`replaced/s` snapshots superseded before UI pickup, `picked/s` snapshots taken
+by the UI, and `paint-new/s` picked revisions submitted to the window.
+`published-row-changes/s` and `paint-row-changes/s` count distinct pixel rows
+at the center of the image at those two stages. The row metrics are useful for
+the moving-stripe fixture below, but changes elsewhere on the screen may be
+missed. A successful window submission still does not prove a compositor
+scanout; compare these counts with a screen recording for that last stage.
+
 ```sh
 FJERN_STATS=1 cargo run --release -p fjern -- tui 2>fjern-stats.log
 python3 tools/summarize_stats.py fjern-stats.log
@@ -82,20 +91,48 @@ center-scanline stripe changes were counted with
 
 This establishes that the VM can deliver more than 32 visible changes/s with
 both clients under this temporary setting. FreeRDP was about 5 changes/s ahead
-in these sequential captures, but the recordings do not identify which stage
-caused the gap. Fjern's internal paint-attempt rate was roughly 50–60/s; those
+in these sequential captures, but the later matched pair below narrowed this
+gap substantially. These recordings do not establish a stable client advantage.
+Fjern's internal paint-attempt rate was roughly 50–60/s; those
 attempts are not confirmed compositor scanouts. A diagnostic run observed no
 Wayland buffer-pool stalls. Shortening the maximum bitmap batch age from 16 to
 12 ms yielded 49.37/s; 8 ms yielded 47.41/s. Neither change improved the
-visible result, so both were reverted. The next investigation should timestamp
-remote bitmap arrival, snapshot publication, window submission and compositor
-presentation before changing the batching or renderer. The temporary registry
-value, test user and page were removed, and the VM was returned to stopped.
+visible result, so both were reverted. The presentation handoff follow-up below
+measured the stages between bitmap updates and window submission. The temporary
+registry value, test user and page were removed, and the VM was returned to
+stopped.
 
 `analyze_rdp_capture.py` requires `ffmpeg` and `ffprobe` and assumes an
 unscaled recording with the benchmark page visible at its center scanline. It
 counts distinct stripe positions in the captured images, not RDP updates,
 browser animation callbacks or physical display refreshes.
+
+### Presentation handoff follow-up, 2026-09-27
+
+With the same temporary host setting and page, `FJERN_STATS=1` measured
+distinct center-row content at each client stage while a 60 frames/s screen
+recording ran. A 30.08 s recorder calibration produced 29.73 s of video. The
+final paired measurement ran the recorder and captured the log boundaries in
+one process: 45.11 s of wall time yielded 44.72 s of video. At the normal
+120 Hz UI polling target, Fjern published, picked up and submitted 55.12
+distinct center rows/s without replacing a pending snapshot; the recording
+showed 50.52 stripe changes/s. The difference is after window submission or
+in compositor/recorder sampling. These measurements do not separate those
+effects. FreeRDP on the same account, page, resolution and host setting showed
+51.30 stripe changes/s in a subsequent 45.10 s wall-time capture (44.72 s of
+video). The earlier roughly 5/s gap narrowed to 0.78/s here, so no stable
+Fjern-specific visible rate regression is established.
+
+Two temporary polling changes were measured on the same session. At 60 Hz, the
+recording showed 50.41 stripe changes/s, while the UI sometimes replaced
+pending snapshots and the maximum snapshot wait was around 16 ms. At 240 Hz,
+the recording showed 46.69 changes/s and the maximum snapshot wait was around
+4 ms. The 120 Hz run averaged 8.36 ms maximum snapshot wait per diagnostic
+interval. The polling variants used log windows that extended beyond the
+recording, so their internal rates should not be paired precisely with the
+video rates. Neither variant establishes a worthwhile visible improvement;
+120 Hz was restored. A follow-up should inspect Wayland frame callbacks and
+presentation timing before changing UI scheduling.
 
 ## VNC tile scheduling and CopyRect
 
