@@ -40,6 +40,7 @@ struct Display {
     stats_replaced: u64,
     stats_row_changes: u64,
     stats_row: Vec<u32>,
+    stats_row_nonzero: usize,
 }
 struct InputBatch {
     epoch: u64,
@@ -147,6 +148,7 @@ pub fn run(
         stats_replaced: 0,
         stats_row_changes: 0,
         stats_row: Vec::new(),
+        stats_row_nonzero: 0,
     });
     let stop = AtomicBool::new(false);
     let shutdown = stream.try_clone()?;
@@ -221,6 +223,7 @@ pub fn run(
             let mut stats_queue_max = Duration::ZERO;
             while window.is_open() {
                 let ready;
+                let center_nonzero;
                 {
                     let mut frame = shared.lock().unwrap();
                     frame.window_size = window.get_size();
@@ -262,6 +265,7 @@ pub fn run(
                         .saturating_sub(last_published_row_changes);
                     last_published_row_changes = frame.stats_row_changes;
                     ready = frame.active && revision != 0;
+                    center_nonzero = frame.stats_row_nonzero;
                 }
                 let transfer = transfer_status
                     .as_ref()
@@ -371,11 +375,12 @@ pub fn run(
                 if stats_enabled && stats_since.elapsed() >= Duration::from_secs(2) {
                     let seconds = stats_since.elapsed().as_secs_f64();
                     eprintln!(
-                        "RDP stats: updates/s={:.1} published/s={:.1} replaced/s={:.1} published-row-changes/s={:.1} picked/s={:.1} paint-attempts/s={:.1} paint-new/s={:.1} paint-row-changes/s={:.1} paint-max-ms={:.2} snapshot-wait-max-ms={:.2} input-queue-max-ms={:.2} network-kib/s={:.1} input-packets/s={:.1} rss-mib={:.1}",
+                        "RDP stats: updates/s={:.1} published/s={:.1} replaced/s={:.1} published-row-changes/s={:.1} published-center-nonzero={} picked/s={:.1} paint-attempts/s={:.1} paint-new/s={:.1} paint-row-changes/s={:.1} paint-max-ms={:.2} snapshot-wait-max-ms={:.2} input-queue-max-ms={:.2} network-kib/s={:.1} input-packets/s={:.1} rss-mib={:.1}",
                         stats_updates as f64 / seconds,
                         stats_published as f64 / seconds,
                         stats_replaced as f64 / seconds,
                         stats_published_row_changes as f64 / seconds,
+                        center_nonzero,
                         stats_picked as f64 / seconds,
                         stats_paints as f64 / seconds,
                         stats_new_paints as f64 / seconds,

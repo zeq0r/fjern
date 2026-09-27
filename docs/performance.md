@@ -25,6 +25,9 @@ at the center of the image at those two stages. The row metrics are useful for
 the moving-stripe fixture below, but changes elsewhere on the screen may be
 missed. A successful window submission still does not prove a compositor
 scanout; compare these counts with a screen recording for that last stage.
+`published-center-nonzero` counts nonblack pixels in the latest published
+center row. Zero can help identify a black decoded image, but cannot establish
+that the entire screen is black.
 
 ```sh
 FJERN_STATS=1 cargo run --release -p fjern -- tui 2>fjern-stats.log

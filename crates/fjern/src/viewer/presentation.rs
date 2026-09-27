@@ -81,11 +81,13 @@ pub(super) fn publish(
             usize::from(state.framebuffer.width),
             usize::from(state.framebuffer.height),
         )
-        && frame.stats_row != row
     {
-        frame.stats_row.clear();
-        frame.stats_row.extend_from_slice(row);
-        frame.stats_row_changes += 1;
+        frame.stats_row_nonzero = row.iter().filter(|&&pixel| pixel != 0).count();
+        if frame.stats_row != row {
+            frame.stats_row.clear();
+            frame.stats_row.extend_from_slice(row);
+            frame.stats_row_changes += 1;
+        }
     }
     frame.width = usize::from(state.framebuffer.width);
     frame.height = usize::from(state.framebuffer.height);
