@@ -92,3 +92,22 @@ approximately 20 new paints per second; the highest reported paint time in the
 steady update intervals was 8.55 ms, with RSS still approximately 45.9 MiB.
 These numbers are from a nested, hidden Wayland session and one 1024×768 xrdp
 desktop, so they are a local baseline rather than a general performance claim.
+
+## Pointer regression check
+
+After a report that clicking an RDP window could fail and disconnect with
+`input outside remote desktop`, the viewer was changed to translate queued
+pointer coordinates from the desktop size shown by the UI to the current RDP
+framebuffer size. A new click in the poll that activates the window is also
+forwarded; a mouse button already held before focus is still ignored.
+
+The change in commit `86f3965` was checked with a fresh temporary xrdp/XFCE
+guest. Fjern ran in a separate Wayland session, and a virtual pointer sent a
+left click to the guest's `xev` window. `xev` recorded both `ButtonPress` and
+`ButtonRelease`. The same pair was recorded after the local Fjern window was
+reduced from 1878×1014 to 1280×800; the connection stayed open. xrdp did not
+confirm a matching remote-resolution change during this second check, so it
+verified pointer delivery through local scaling. The separate coordinate
+regression test covers an input batch queued at 1920×1080 and processed after
+the remote framebuffer becomes 1024×768. A Windows-host click test is still
+needed to confirm the reported case on that host.
