@@ -72,6 +72,12 @@ impl Resize {
     pub fn waiting(&self) -> bool {
         self.pending.is_some()
     }
+    /// A completed GFX frame can confirm a pending resize once poll also sees
+    /// the requested dimensions. Bitmap output needs its own confirmation.
+    pub fn framebuffer_ready(&self, desktop: &Session) -> bool {
+        desktop.framebuffer.updates > 0
+            && (desktop.display_resize_confirmed() || !self.waiting() || self.graphics_revision > 0)
+    }
     /// Accept bitmap updates at the requested size before a server reactivation.
     /// xrdp can start sending the new size without a Demand Active PDU. Once
     /// GFX frames are flowing, their ResetGraphics dimensions own the output;
@@ -624,5 +630,32 @@ mod tests {
                 .iter()
                 .all(|&pixel| pixel == 0x222222)
         );
+    }
+    #[test]
+    fn graphics_frame_confirms_resize_without_bitmap_confirmation() {
+        let mut graphics = ready();
+        graphics.graphics = Some(Gfx::new());
+        graphics.graphics_revision = 1;
+        let now = Instant::now();
+        graphics.pending = Some(((960, 528), now));
+        let mut desktop = Session::new(1002, 1003).unwrap();
+        desktop.framebuffer = linrdp_proto::desktop::Framebuffer::new(960, 528).unwrap();
+        desktop.framebuffer.updates = 1;
+        assert!(!desktop.display_resize_confirmed());
+        assert!(graphics.framebuffer_ready(&desktop));
+        graphics
+            .poll(
+                now,
+                (960, 528),
+                (960, 528),
+                true,
+                graphics.framebuffer_ready(&desktop),
+            )
+            .unwrap();
+        assert!(!graphics.waiting());
+
+        let mut bitmap = ready();
+        bitmap.pending = Some(((960, 528), now));
+        assert!(!bitmap.framebuffer_ready(&desktop));
     }
 }

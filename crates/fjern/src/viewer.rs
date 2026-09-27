@@ -453,8 +453,7 @@ fn receive(
                 desired,
                 (state.framebuffer.width, state.framebuffer.height),
                 state.phase == Phase::Active,
-                state.framebuffer.updates > 0
-                    && (state.display_resize_confirmed() || !resize.waiting()),
+                resize.framebuffer_ready(state),
             )? {
                 resize.prepare_framebuffer(state)?;
                 if let Some(packet) = state.input(&[Input::ReleaseAll])? {
