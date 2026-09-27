@@ -383,10 +383,16 @@ Local release measurements for this follow-up (not remote FPS):
   measured 2.586 → 0.978 ms per 1080p frame and 9.529 → 3.942 ms per 4K frame;
   the post-decode ClearCodec path measured 1.773 → 0.978 ms and 6.884 → 3.942 ms.
   These times exclude ClearCodec decompression, networking and visible FPS.
+- Planar GFX now writes the decoded RGB24 stream directly into the surface,
+  removing its temporary `u32` image and final copy. A local 20-iteration
+  post-decode benchmark measured 2.690 → 1.759 ms per 1080p frame and
+  9.375 → 6.430 ms per 4K frame. Planar decompression and display time are
+  excluded.
 
 ```sh
 cargo test --release -p linrdp-proto --locked benchmark_graphics_presentation -- --ignored --nocapture
 cargo test --release -p linrdp-proto --locked benchmark_bgra_graphics_blit -- --ignored --nocapture
+cargo test --release -p linrdp-proto --locked benchmark_rgb24_graphics_blit -- --ignored --nocapture
 cargo test --release -p linrdp-proto --locked benchmark_avc_region_conversion -- --ignored --nocapture
 cargo test --release -p fjern --locked benchmark_snapshot_burst -- --ignored --nocapture
 ```

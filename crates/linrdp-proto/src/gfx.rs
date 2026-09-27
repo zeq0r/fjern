@@ -468,20 +468,7 @@ impl Gfx {
             ironrdp_graphics::rdp6::BitmapStreamDecoder::default()
                 .decode_bitmap_stream_to_rgb24(data, &mut rgb, rect.width(), rect.height())
                 .map_err(|e| bad(format!("Planar {}x{}: {e}", rect.width(), rect.height())))?;
-            if rgb.len() != rect.width() * rect.height() * 3 {
-                return Err(bad("decoded planar bitmap length mismatch"));
-            }
-            let bitmap = Bitmap {
-                width: rect.width(),
-                height: rect.height(),
-                pixels: rgb
-                    .as_chunks::<3>()
-                    .0
-                    .iter()
-                    .map(|p| (p[0] as u32) << 16 | (p[1] as u32) << 8 | p[2] as u32)
-                    .collect(),
-            };
-            return blit(&mut self.surface_mut(id)?.buffer, &bitmap, rect.l, rect.t);
+            return blit_rgb24(&mut self.surface_mut(id)?.buffer, &rgb, rect);
         }
         if codec == 0 {
             return blit_bgra(&mut self.surface_mut(id)?.buffer, data, rect);
@@ -731,6 +718,22 @@ fn blit_bgra(f: &mut Framebuffer, data: &[u8], rect: Rect) -> Result<()> {
         let target = &mut f.pixels[start..start + width];
         for (pixel, bgra) in target.iter_mut().zip(source.as_chunks::<4>().0) {
             *pixel = u32::from_le_bytes(*bgra) & 0xffffff;
+        }
+    }
+    Ok(())
+}
+fn blit_rgb24(f: &mut Framebuffer, data: &[u8], rect: Rect) -> Result<()> {
+    rect.check(f.width as usize, f.height as usize)?;
+    let width = rect.width();
+    if data.len() != width * rect.height() * 3 {
+        return Err(bad("decoded planar bitmap length mismatch"));
+    }
+    f.damage.mark(rect.t, rect.b);
+    for (row, source) in data.chunks_exact(width * 3).enumerate() {
+        let start = (rect.t + row) * f.width as usize + rect.l;
+        let target = &mut f.pixels[start..start + width];
+        for (pixel, rgb) in target.iter_mut().zip(source.as_chunks::<3>().0) {
+            *pixel = (rgb[0] as u32) << 16 | (rgb[1] as u32) << 8 | rgb[2] as u32;
         }
     }
     Ok(())
@@ -1228,6 +1231,48 @@ mod tests {
                 "{width}x{height} BGRA blit: direct {:.3} ms/frame; copied {:.3} ms/frame; converted {:.3} ms/frame",
                 direct_time.as_secs_f64() * 50.0,
                 copied_time.as_secs_f64() * 50.0,
+                converted_time.as_secs_f64() * 50.0
+            );
+        }
+    }
+    #[test]
+    #[ignore = "manual release-mode RGB24 graphics benchmark"]
+    fn benchmark_rgb24_graphics_blit() {
+        use std::{hint::black_box, time::Instant};
+        for (width, height) in [(1920u16, 1080u16), (3840, 2160)] {
+            let rect = Rect {
+                l: 0,
+                t: 0,
+                r: width as usize,
+                b: height as usize,
+            };
+            let data = [0x12, 0x34, 0x56].repeat(rect.width() * rect.height());
+            let mut direct = Framebuffer::new(width, height).unwrap();
+            let mut converted = Framebuffer::new(width, height).unwrap();
+            let start = Instant::now();
+            for _ in 0..20 {
+                blit_rgb24(&mut direct, black_box(&data), rect).unwrap();
+            }
+            let direct_time = start.elapsed();
+            let start = Instant::now();
+            for _ in 0..20 {
+                let bitmap = Bitmap {
+                    width: rect.width(),
+                    height: rect.height(),
+                    pixels: black_box(&data)
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .map(|rgb| (rgb[0] as u32) << 16 | (rgb[1] as u32) << 8 | rgb[2] as u32)
+                        .collect(),
+                };
+                blit(&mut converted, &bitmap, 0, 0).unwrap();
+            }
+            let converted_time = start.elapsed();
+            assert_eq!(direct.pixels, converted.pixels);
+            println!(
+                "{width}x{height} RGB24 blit: direct {:.3} ms/frame; converted {:.3} ms/frame",
+                direct_time.as_secs_f64() * 50.0,
                 converted_time.as_secs_f64() * 50.0
             );
         }
