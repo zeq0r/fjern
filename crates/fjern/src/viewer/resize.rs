@@ -73,7 +73,9 @@ impl Resize {
         self.pending.is_some()
     }
     /// Accept bitmap updates at the requested size before a server reactivation.
-    /// xrdp can start sending the new size without a Demand Active PDU.
+    /// xrdp can start sending the new size without a Demand Active PDU. Once
+    /// GFX frames are flowing, their ResetGraphics dimensions own the output;
+    /// a speculative bitmap fallback would overwrite newer GFX frames on timeout.
     pub fn prepare_framebuffer(&mut self, desktop: &mut Session) -> Result<(), Error> {
         let Some((target, _)) = self.pending else {
             return Ok(());
@@ -81,6 +83,9 @@ impl Resize {
         // A timed-out request can be replaced in the same poll. Settle its
         // framebuffer before beginning the next one.
         desktop.finish_display_resize();
+        if self.graphics.as_ref().is_some_and(|gfx| gfx.frames > 0) {
+            return Ok(());
+        }
         desktop.begin_display_resize(target.0, target.1)?;
         Ok(())
     }
@@ -129,6 +134,11 @@ impl Resize {
             }
             if graphics.revision != self.graphics_revision {
                 if let Some(frame) = &mut graphics.output {
+                    // A first GFX frame supersedes any speculative bitmap
+                    // framebuffer prepared before the graphics channel began.
+                    if self.graphics_revision == 0 {
+                        desktop.finish_display_resize();
+                    }
                     // Pixels and their damage generations must travel together.
                     std::mem::swap(&mut desktop.framebuffer, frame);
                     desktop.revision = desktop.revision.saturating_add(1);
@@ -306,6 +316,13 @@ mod tests {
             0x13,
             &[5, 1, 8, 0, 4, 0, 0, 0, 0x12, 0, 0, 0],
         );
+        // A resize can start before the first graphics frame arrives.
+        r.pending = Some(((6, 6), Instant::now()));
+        r.prepare_framebuffer(&mut desktop).unwrap();
+        assert_eq!(
+            (desktop.framebuffer.width, desktop.framebuffer.height),
+            (6, 6)
+        );
         for (index, size) in [4u16, 8, 2, 4].into_iter().enumerate() {
             if index > 0 {
                 pdu(&mut r, &mut desktop, 0xa, &1u16.to_le_bytes());
@@ -344,6 +361,10 @@ mod tests {
                 pdu(&mut r, &mut desktop, 4, &fill);
                 assert_eq!(desktop.framebuffer.pixels, previous, "open frame leaked");
                 pdu(&mut r, &mut desktop, 0xc, &frame.to_le_bytes());
+                if index == 0 && frame == 0 {
+                    r.pending = None;
+                    r.finish_framebuffer(&mut desktop);
+                }
                 assert_eq!(
                     (desktop.framebuffer.width, desktop.framebuffer.height),
                     (size, size)
@@ -356,7 +377,7 @@ mod tests {
                 assert!(desktop.framebuffer.pixels[1..].iter().all(|p| *p == 0));
             }
         }
-        assert_eq!(desktop.revision, 20);
+        assert_eq!(desktop.revision, 22);
     }
     fn ready() -> Resize {
         let mut r = Resize::new(1004, 1005);
@@ -562,6 +583,46 @@ mod tests {
             u32::from_le_bytes(packets[0][11..15].try_into().unwrap()),
             0x03,
             "DRDYNVC must not set CHANNEL_FLAG_SHOW_PROTOCOL"
+        );
+    }
+    #[test]
+    fn unconfirmed_resize_keeps_new_graphics_frames() {
+        let mut desktop = Session::new(1002, 1003).unwrap();
+        desktop.framebuffer.pixels.fill(0x111111);
+        let mut graphics = Resize::with_graphics(1002, 1004, true);
+        graphics.graphics.as_mut().unwrap().frames = 1;
+        graphics.pending = Some(((960, 528), Instant::now()));
+        graphics.prepare_framebuffer(&mut desktop).unwrap();
+        assert_eq!(
+            (desktop.framebuffer.width, desktop.framebuffer.height),
+            (1024, 768)
+        );
+        desktop.framebuffer.pixels.fill(0x222222);
+        graphics.pending = None;
+        graphics.finish_framebuffer(&mut desktop);
+        assert!(
+            desktop
+                .framebuffer
+                .pixels
+                .iter()
+                .all(|&pixel| pixel == 0x222222)
+        );
+
+        let mut bitmap = Resize::new(1002, 1004);
+        bitmap.pending = Some(((960, 528), Instant::now()));
+        bitmap.prepare_framebuffer(&mut desktop).unwrap();
+        assert_eq!(
+            (desktop.framebuffer.width, desktop.framebuffer.height),
+            (960, 528)
+        );
+        bitmap.pending = None;
+        bitmap.finish_framebuffer(&mut desktop);
+        assert!(
+            desktop
+                .framebuffer
+                .pixels
+                .iter()
+                .all(|&pixel| pixel == 0x222222)
         );
     }
 }
