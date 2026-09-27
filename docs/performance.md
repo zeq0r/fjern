@@ -11,6 +11,12 @@ client-side segments, not input-to-display latency. VNC reports its longest
 event batch and total scaling time per interval. `FJERN_VNC_STATS=1` remains an
 alias for VNC diagnostics.
 
+For RDP, `network-kib/s` counts decrypted desktop transport bytes read from the
+connection, and `input-packets/s` counts input packets accepted by the bounded
+TLS output queue. During a blank-screen report, these show whether the server is
+still sending data and whether local input reaches the transport. They do not
+prove that Windows processed a click or rendered a new frame.
+
 RDP additionally reports `published/s` snapshots created by the receiver,
 `replaced/s` snapshots superseded before UI pickup, `picked/s` snapshots taken
 by the UI, and `paint-new/s` picked revisions submitted to the window.

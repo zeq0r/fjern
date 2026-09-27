@@ -153,10 +153,14 @@ pub fn run(
     let mut transport = transport::Transport::new(stream.try_clone()?)?;
     let (sender, receiver) = mpsc::sync_channel::<InputBatch>(128);
     let input_queue_max = AtomicU64::new(0);
+    let network_bytes = AtomicU64::new(0);
+    let input_packets = AtomicU64::new(0);
     std::thread::scope(|scope| -> Result<(), Error> {
         let shared = &shared;
         let stop = &stop;
         let input_queue_max = &input_queue_max;
+        let network_bytes = &network_bytes;
+        let input_packets = &input_packets;
         let worker = scope.spawn(move || {
             let result = receive(
                 connection,
@@ -169,6 +173,9 @@ pub fn run(
                     clipboard: &mut clipboard,
                     resize: &mut resize,
                     input_queue_max,
+                    network_bytes,
+                    input_packets,
+                    stats_enabled,
                 },
             );
             // Release only input actually sent, including when the UI closes.
@@ -364,7 +371,7 @@ pub fn run(
                 if stats_enabled && stats_since.elapsed() >= Duration::from_secs(2) {
                     let seconds = stats_since.elapsed().as_secs_f64();
                     eprintln!(
-                        "RDP stats: updates/s={:.1} published/s={:.1} replaced/s={:.1} published-row-changes/s={:.1} picked/s={:.1} paint-attempts/s={:.1} paint-new/s={:.1} paint-row-changes/s={:.1} paint-max-ms={:.2} snapshot-wait-max-ms={:.2} input-queue-max-ms={:.2} rss-mib={:.1}",
+                        "RDP stats: updates/s={:.1} published/s={:.1} replaced/s={:.1} published-row-changes/s={:.1} picked/s={:.1} paint-attempts/s={:.1} paint-new/s={:.1} paint-row-changes/s={:.1} paint-max-ms={:.2} snapshot-wait-max-ms={:.2} input-queue-max-ms={:.2} network-kib/s={:.1} input-packets/s={:.1} rss-mib={:.1}",
                         stats_updates as f64 / seconds,
                         stats_published as f64 / seconds,
                         stats_replaced as f64 / seconds,
@@ -376,6 +383,8 @@ pub fn run(
                         stats_paint_max.as_secs_f64() * 1000.0,
                         stats_queue_max.as_secs_f64() * 1000.0,
                         input_queue_max.swap(0, Ordering::Relaxed) as f64 / 1_000_000.0,
+                        network_bytes.swap(0, Ordering::Relaxed) as f64 / seconds / 1024.0,
+                        input_packets.swap(0, Ordering::Relaxed) as f64 / seconds,
                         crate::metrics::rss_mib().unwrap_or(0.0),
                     );
                     stats_since = Instant::now();
@@ -410,6 +419,9 @@ struct Channels<'a> {
     clipboard: &'a mut Option<crate::clipboard::Clipboard>,
     resize: &'a mut Option<resize::Resize>,
     input_queue_max: &'a AtomicU64,
+    network_bytes: &'a AtomicU64,
+    input_packets: &'a AtomicU64,
+    stats_enabled: bool,
 }
 fn receive(
     connection: &mut rustls::ClientConnection,
@@ -478,6 +490,9 @@ fn receive(
             let events = batch.for_remote((state.framebuffer.width, state.framebuffer.height));
             if let Some(packet) = state.input(&events)? {
                 stream.write_plaintext(connection, &data::encode(&packet)?)?;
+                if channels.stats_enabled {
+                    channels.input_packets.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         if state.phase == Phase::Active
@@ -499,6 +514,11 @@ fn receive(
         match stream.read_chunk(connection, &mut bytes, batch.read_budget()) {
             Ok(0) => return Err("server closed the desktop connection".into()),
             Ok(count) => {
+                if channels.stats_enabled {
+                    channels
+                        .network_bytes
+                        .fetch_add(count as u64, Ordering::Relaxed);
+                }
                 pending.extend_from_slice(&bytes[..count]);
                 if pending.len() > u16::MAX as usize + bytes.len() {
                     return Err("desktop receive buffer exceeded limit".into());
