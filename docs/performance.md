@@ -376,6 +376,11 @@ Local release measurements for this follow-up (not remote FPS):
   per-delta full copies and 5.1 ms for 17 demand-produced, row-aware snapshots.
   This combines coalescing already present before this patch with row reuse;
   it is not an isolated comparison against the previous coalesced implementation.
+- Raw GFX bitmap updates now decode BGRA directly into the destination surface,
+  avoiding two temporary image allocations and a final copy. A local release
+  microbenchmark measured 2.558 → 0.966 ms per 1080p frame and 9.546 → 3.863 ms
+  per 4K frame over 20 iterations. These are single-run in-process measurements,
+  not network or visible FPS results.
 
 ```sh
 cargo test --release -p linrdp-proto --locked benchmark_graphics_presentation -- --ignored --nocapture

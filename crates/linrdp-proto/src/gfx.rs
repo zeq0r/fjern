@@ -483,13 +483,10 @@ impl Gfx {
             };
             return blit(&mut self.surface_mut(id)?.buffer, &bitmap, rect.l, rect.t);
         }
+        if codec == 0 {
+            return blit_bgra(&mut self.surface_mut(id)?.buffer, data, rect);
+        }
         let bytes = match codec {
-            0 => {
-                if data.len() != rect.width() * rect.height() * 4 {
-                    return Err(bad("invalid raw graphics bitmap length"));
-                }
-                data.to_vec()
-            }
             8 => self
                 .clear
                 .decode(data, rect.width() as u16, rect.height() as u16)
@@ -729,6 +726,22 @@ fn blit(f: &mut Framebuffer, b: &Bitmap, x: usize, y: usize) -> Result<()> {
     for row in 0..b.height {
         let dst = (y + row) * f.width as usize + x;
         f.pixels[dst..dst + b.width].copy_from_slice(&b.pixels[row * b.width..(row + 1) * b.width]);
+    }
+    Ok(())
+}
+fn blit_bgra(f: &mut Framebuffer, data: &[u8], rect: Rect) -> Result<()> {
+    rect.check(f.width as usize, f.height as usize)?;
+    let width = rect.width();
+    if data.len() != width * rect.height() * 4 {
+        return Err(bad("invalid raw graphics bitmap length"));
+    }
+    f.damage.mark(rect.t, rect.b);
+    for (row, source) in data.chunks_exact(width * 4).enumerate() {
+        let start = (rect.t + row) * f.width as usize + rect.l;
+        let target = &mut f.pixels[start..start + width];
+        for (pixel, bgra) in target.iter_mut().zip(source.as_chunks::<4>().0) {
+            *pixel = u32::from_le_bytes(*bgra) & 0xffffff;
+        }
     }
     Ok(())
 }
@@ -1136,6 +1149,70 @@ mod tests {
             b.extend(data);
             send(&mut g, 1, &b).unwrap();
             assert_eq!(g.surface(1).unwrap().buffer.pixels, vec![0x785634; 16]);
+        }
+        let mut g = setup();
+        let mut body = 1u16.to_le_bytes().to_vec();
+        body.extend(0u16.to_le_bytes());
+        body.push(0x20);
+        for edge in [1u16, 1, 3, 3] {
+            body.extend(edge.to_le_bytes());
+        }
+        let pixels = [0x33, 0x22, 0x11, 0xaa].repeat(4);
+        body.extend((pixels.len() as u32).to_le_bytes());
+        body.extend(pixels);
+        send(&mut g, 1, &body).unwrap();
+        let mut expected = vec![0; 16];
+        for index in [5, 6, 9, 10] {
+            expected[index] = 0x112233;
+        }
+        assert_eq!(g.surface(1).unwrap().buffer.pixels, expected);
+        let mut invalid = body;
+        invalid.pop();
+        invalid[13..17].copy_from_slice(&15u32.to_le_bytes());
+        assert!(send(&mut g, 1, &invalid).is_err());
+        assert_eq!(g.surface(1).unwrap().buffer.pixels, expected);
+    }
+    #[test]
+    #[ignore = "manual release-mode raw graphics benchmark"]
+    fn benchmark_raw_graphics_blit() {
+        use std::{hint::black_box, time::Instant};
+        for (width, height) in [(1920u16, 1080u16), (3840, 2160)] {
+            let rect = Rect {
+                l: 0,
+                t: 0,
+                r: width as usize,
+                b: height as usize,
+            };
+            let data = [0x34, 0x56, 0x78, 0xff].repeat(rect.width() * rect.height());
+            let mut direct = Framebuffer::new(width, height).unwrap();
+            let mut copied = Framebuffer::new(width, height).unwrap();
+            let start = Instant::now();
+            for _ in 0..20 {
+                blit_bgra(&mut direct, black_box(&data), rect).unwrap();
+            }
+            let direct_time = start.elapsed();
+            let start = Instant::now();
+            for _ in 0..20 {
+                let bytes = black_box(&data).to_vec();
+                let bitmap = Bitmap {
+                    width: rect.width(),
+                    height: rect.height(),
+                    pixels: bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|pixel| u32::from_le_bytes(*pixel) & 0xffffff)
+                        .collect(),
+                };
+                blit(&mut copied, &bitmap, 0, 0).unwrap();
+            }
+            let copied_time = start.elapsed();
+            assert_eq!(direct.pixels, copied.pixels);
+            println!(
+                "{width}x{height} raw GFX: direct {:.3} ms/frame; copied {:.3} ms/frame",
+                direct_time.as_secs_f64() * 50.0,
+                copied_time.as_secs_f64() * 50.0
+            );
         }
     }
     #[test]
