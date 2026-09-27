@@ -221,7 +221,7 @@ impl Controller {
         let Sample {
             focused,
             keys,
-            keys_changed,
+            mut keys_changed,
             pointer_changed,
             position,
             buttons,
@@ -242,8 +242,19 @@ impl Controller {
         if !self.focused {
             self.focused = true;
             self.ignored = keys;
-            self.ignored_buttons = buttons;
-            return events;
+            keys_changed.clear();
+            let new_click = pointer_changed
+                .iter()
+                .any(|event| event.down && event.position.is_some());
+            self.ignored_buttons = std::array::from_fn(|i| {
+                buttons[i]
+                    && !pointer_changed
+                        .iter()
+                        .any(|event| event.button == i && event.down && event.position.is_some())
+            });
+            if !new_click {
+                return events;
+            }
         }
         for (key, down) in keys_changed {
             if self.ignored.contains(&key) {
@@ -768,6 +779,37 @@ mod tests {
                 0.
             )
             .is_empty()
+        );
+    }
+    #[test]
+    fn click_that_focuses_window_reaches_remote_desktop() {
+        let mut c = Controller::default();
+        assert_eq!(
+            sample!(
+                &mut c,
+                true,
+                BTreeSet::new(),
+                vec![],
+                vec![(0, true, Some((40, 50))), (0, false, Some((40, 50)))],
+                Some((40, 50)),
+                [false; 3],
+                0.,
+            ),
+            [
+                Input::Move { x: 40, y: 50 },
+                Input::Button {
+                    button: 1,
+                    down: true,
+                    x: 40,
+                    y: 50,
+                },
+                Input::Button {
+                    button: 1,
+                    down: false,
+                    x: 40,
+                    y: 50,
+                },
+            ]
         );
     }
     #[test]

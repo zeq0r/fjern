@@ -44,7 +44,32 @@ struct Display {
 struct InputBatch {
     epoch: u64,
     queued_at: Instant,
+    remote_size: (usize, usize),
     events: Vec<Input>,
+}
+impl InputBatch {
+    fn for_remote(&self, size: (u16, u16)) -> Vec<Input> {
+        let map = |value: u16, source: usize, target: u16| {
+            ((usize::from(value) * usize::from(target) / source.max(1))
+                .min(usize::from(target.saturating_sub(1)))) as u16
+        };
+        self.events
+            .iter()
+            .map(|event| match *event {
+                Input::Move { x, y } => Input::Move {
+                    x: map(x, self.remote_size.0, size.0),
+                    y: map(y, self.remote_size.1, size.1),
+                },
+                Input::Button { button, down, x, y } => Input::Button {
+                    button,
+                    down,
+                    x: map(x, self.remote_size.0, size.0),
+                    y: map(y, self.remote_size.1, size.1),
+                },
+                other => other,
+            })
+            .collect()
+    }
 }
 
 pub fn run(
@@ -263,6 +288,7 @@ pub fn run(
                             .try_send(InputBatch {
                                 epoch: input_epoch,
                                 queued_at: Instant::now(),
+                                remote_size: (width, height),
                                 events,
                             })
                             .map_err(|_| "input queue unavailable")?;
@@ -322,6 +348,7 @@ pub fn run(
                         .try_send(InputBatch {
                             epoch: input_epoch,
                             queued_at: Instant::now(),
+                            remote_size: (width, height),
                             events,
                         })
                         .map_err(
@@ -448,7 +475,8 @@ fn receive(
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            if let Some(packet) = state.input(&batch.events)? {
+            let events = batch.for_remote((state.framebuffer.width, state.framebuffer.height));
+            if let Some(packet) = state.input(&events)? {
                 stream.write_plaintext(connection, &data::encode(&packet)?)?;
             }
         }
@@ -596,6 +624,48 @@ fn consume_framed(
 #[cfg(test)]
 mod framing_tests {
     use super::*;
+
+    #[test]
+    fn queued_click_uses_current_desktop_size_after_resize() {
+        let batch = InputBatch {
+            epoch: 0,
+            queued_at: Instant::now(),
+            remote_size: (1920, 1080),
+            events: vec![
+                Input::Move { x: 960, y: 540 },
+                Input::Button {
+                    button: 1,
+                    down: true,
+                    x: 1919,
+                    y: 1079,
+                },
+                Input::Button {
+                    button: 1,
+                    down: false,
+                    x: 1919,
+                    y: 1079,
+                },
+            ],
+        };
+        assert_eq!(
+            batch.for_remote((1024, 768)),
+            [
+                Input::Move { x: 512, y: 384 },
+                Input::Button {
+                    button: 1,
+                    down: true,
+                    x: 1023,
+                    y: 767,
+                },
+                Input::Button {
+                    button: 1,
+                    down: false,
+                    x: 1023,
+                    y: 767,
+                },
+            ]
+        );
+    }
 
     #[test]
     fn coalesced_packets_preserve_trailing_fragment_and_order() {
