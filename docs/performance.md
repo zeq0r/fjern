@@ -376,14 +376,17 @@ Local release measurements for this follow-up (not remote FPS):
   per-delta full copies and 5.1 ms for 17 demand-produced, row-aware snapshots.
   This combines coalescing already present before this patch with row reuse;
   it is not an isolated comparison against the previous coalesced implementation.
-- Raw GFX bitmap updates now decode BGRA directly into the destination surface,
-  avoiding two temporary image allocations and a final copy. A local release
-  microbenchmark measured 2.558 → 0.966 ms per 1080p frame and 9.546 → 3.863 ms
-  per 4K frame over 20 iterations. These are single-run in-process measurements,
-  not network or visible FPS results.
+- Raw GFX bitmaps now write BGRA directly into the destination surface, avoiding
+  two temporary image allocations and a final copy. ClearCodec writes its
+  decoded BGRA output through the same path, avoiding one temporary image and
+  a copy. In one local release microbenchmark over 20 iterations, the raw path
+  measured 2.586 → 0.978 ms per 1080p frame and 9.529 → 3.942 ms per 4K frame;
+  the post-decode ClearCodec path measured 1.773 → 0.978 ms and 6.884 → 3.942 ms.
+  These times exclude ClearCodec decompression, networking and visible FPS.
 
 ```sh
 cargo test --release -p linrdp-proto --locked benchmark_graphics_presentation -- --ignored --nocapture
+cargo test --release -p linrdp-proto --locked benchmark_bgra_graphics_blit -- --ignored --nocapture
 cargo test --release -p linrdp-proto --locked benchmark_avc_region_conversion -- --ignored --nocapture
 cargo test --release -p fjern --locked benchmark_snapshot_burst -- --ignored --nocapture
 ```

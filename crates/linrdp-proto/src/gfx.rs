@@ -486,8 +486,8 @@ impl Gfx {
         if codec == 0 {
             return blit_bgra(&mut self.surface_mut(id)?.buffer, data, rect);
         }
-        let bytes = match codec {
-            8 => self
+        if codec == 8 {
+            let bytes = self
                 .clear
                 .decode(data, rect.width() as u16, rect.height() as u16)
                 .map_err(|e| {
@@ -498,23 +498,13 @@ impl Gfx {
                         rect.l,
                         rect.t
                     ))
-                })?,
-            _ => return Err(bad(format!("unsupported graphics codec 0x{codec:04x}"))),
-        };
-        if bytes.len() != rect.width() * rect.height() * 4 {
-            return Err(bad("decoded graphics bitmap length mismatch"));
+                })?;
+            if bytes.len() != rect.width() * rect.height() * 4 {
+                return Err(bad("decoded graphics bitmap length mismatch"));
+            }
+            return blit_bgra(&mut self.surface_mut(id)?.buffer, &bytes, rect);
         }
-        let bitmap = Bitmap {
-            width: rect.width(),
-            height: rect.height(),
-            pixels: bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|b| u32::from_le_bytes(*b) & 0xffffff)
-                .collect(),
-        };
-        blit(&mut self.surface_mut(id)?.buffer, &bitmap, rect.l, rect.t)
+        Err(bad(format!("unsupported graphics codec 0x{codec:04x}")))
     }
     fn progressive(&mut self, c: &mut Cursor<'_>) -> Result<()> {
         let id = c.u16()?;
@@ -1150,31 +1140,40 @@ mod tests {
             send(&mut g, 1, &b).unwrap();
             assert_eq!(g.surface(1).unwrap().buffer.pixels, vec![0x785634; 16]);
         }
-        let mut g = setup();
-        let mut body = 1u16.to_le_bytes().to_vec();
-        body.extend(0u16.to_le_bytes());
-        body.push(0x20);
-        for edge in [1u16, 1, 3, 3] {
-            body.extend(edge.to_le_bytes());
+        for codec in [0u16, 8] {
+            let mut g = setup();
+            let mut body = 1u16.to_le_bytes().to_vec();
+            body.extend(codec.to_le_bytes());
+            body.push(0x20);
+            for edge in [1u16, 1, 3, 3] {
+                body.extend(edge.to_le_bytes());
+            }
+            let pixels = [0x33, 0x22, 0x11, 0xaa].repeat(4);
+            let data = if codec == 8 {
+                ironrdp_graphics::clearcodec::ClearCodecEncoder::new().encode(&pixels, 2, 2)
+            } else {
+                pixels
+            };
+            body.extend((data.len() as u32).to_le_bytes());
+            body.extend(data);
+            send(&mut g, 1, &body).unwrap();
+            let mut expected = vec![0; 16];
+            for index in [5, 6, 9, 10] {
+                expected[index] = 0x112233;
+            }
+            assert_eq!(g.surface(1).unwrap().buffer.pixels, expected);
+            if codec == 0 {
+                let mut invalid = body;
+                invalid.pop();
+                invalid[13..17].copy_from_slice(&15u32.to_le_bytes());
+                assert!(send(&mut g, 1, &invalid).is_err());
+                assert_eq!(g.surface(1).unwrap().buffer.pixels, expected);
+            }
         }
-        let pixels = [0x33, 0x22, 0x11, 0xaa].repeat(4);
-        body.extend((pixels.len() as u32).to_le_bytes());
-        body.extend(pixels);
-        send(&mut g, 1, &body).unwrap();
-        let mut expected = vec![0; 16];
-        for index in [5, 6, 9, 10] {
-            expected[index] = 0x112233;
-        }
-        assert_eq!(g.surface(1).unwrap().buffer.pixels, expected);
-        let mut invalid = body;
-        invalid.pop();
-        invalid[13..17].copy_from_slice(&15u32.to_le_bytes());
-        assert!(send(&mut g, 1, &invalid).is_err());
-        assert_eq!(g.surface(1).unwrap().buffer.pixels, expected);
     }
     #[test]
-    #[ignore = "manual release-mode raw graphics benchmark"]
-    fn benchmark_raw_graphics_blit() {
+    #[ignore = "manual release-mode BGRA graphics benchmark"]
+    fn benchmark_bgra_graphics_blit() {
         use std::{hint::black_box, time::Instant};
         for (width, height) in [(1920u16, 1080u16), (3840, 2160)] {
             let rect = Rect {
@@ -1186,6 +1185,7 @@ mod tests {
             let data = [0x34, 0x56, 0x78, 0xff].repeat(rect.width() * rect.height());
             let mut direct = Framebuffer::new(width, height).unwrap();
             let mut copied = Framebuffer::new(width, height).unwrap();
+            let mut converted = Framebuffer::new(width, height).unwrap();
             let start = Instant::now();
             for _ in 0..20 {
                 blit_bgra(&mut direct, black_box(&data), rect).unwrap();
@@ -1207,11 +1207,28 @@ mod tests {
                 blit(&mut copied, &bitmap, 0, 0).unwrap();
             }
             let copied_time = start.elapsed();
+            let start = Instant::now();
+            for _ in 0..20 {
+                let bitmap = Bitmap {
+                    width: rect.width(),
+                    height: rect.height(),
+                    pixels: black_box(&data)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|pixel| u32::from_le_bytes(*pixel) & 0xffffff)
+                        .collect(),
+                };
+                blit(&mut converted, &bitmap, 0, 0).unwrap();
+            }
+            let converted_time = start.elapsed();
             assert_eq!(direct.pixels, copied.pixels);
+            assert_eq!(direct.pixels, converted.pixels);
             println!(
-                "{width}x{height} raw GFX: direct {:.3} ms/frame; copied {:.3} ms/frame",
+                "{width}x{height} BGRA blit: direct {:.3} ms/frame; copied {:.3} ms/frame; converted {:.3} ms/frame",
                 direct_time.as_secs_f64() * 50.0,
-                copied_time.as_secs_f64() * 50.0
+                copied_time.as_secs_f64() * 50.0,
+                converted_time.as_secs_f64() * 50.0
             );
         }
     }
