@@ -368,7 +368,7 @@ pub fn run(
                 }
                 if ready && !shown {
                     println!(
-                        "First remote bitmap displayed: {width}x{height}. Close the window to disconnect; the remote account is not signed out."
+                        "First remote desktop frame displayed: {width}x{height}. Close the window to disconnect; the remote account is not signed out."
                     );
                     shown = true;
                 }
