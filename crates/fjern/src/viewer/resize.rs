@@ -116,7 +116,7 @@ impl Resize {
                     *graphics = Gfx::new();
                     self.graphics_revision = 0;
                     self.avc_reported = false;
-                    println!("RDP graphics channel opened; offering H.264 AVC420.");
+                    println!("RDP graphics channel opened; offering H.264 AVC420 and AVC444v2.");
                     vec![graphics.advertise()]
                 }
                 GraphicsEvent::Data(bytes) => {
@@ -135,7 +135,7 @@ impl Resize {
                 }
             };
             if graphics.avc_frames > 0 && !self.avc_reported {
-                println!("H.264 AVC420 decoding active (OpenH264 software decoder).");
+                println!("H.264 decoding active (FFmpeg software decoder).");
                 self.avc_reported = true;
             }
             if graphics.revision != self.graphics_revision {

@@ -117,7 +117,7 @@ explicitly approved certificate fingerprint. See [certificate trust](docs/tls.md
 | Display | Native window, dynamic resolution, local scaling | Native window, server resize requests, local scaling |
 | Input | Keyboard, pointer, wheel, shortcut capture | Keyboard, pointer, wheel, shortcut capture |
 | Clipboard | Text, files and directories | Text |
-| Graphics | Bitmap by default; experimental H.264/AVC420 | ZRLE, Raw and CopyRect |
+| Graphics | Bitmap by default; experimental H.264/AVC420 and AVC444v2 | ZRLE, Raw and CopyRect |
 | Authentication | Verified TLS with NTLM CredSSP/NLA or TLS-only Client Info login | VeNCrypt and classic VNC authentication |
 
 The [xrdp check](docs/linux-xrdp-first-probe.md) covers desktop display and
@@ -141,7 +141,7 @@ for the guarantees and differences between connection modes.
 ### Current limits
 
 - One remote monitor per connection.
-- H.264 uses experimental software AVC420 decoding; bitmap is the RDP default.
+- H.264 uses experimental software AVC420/AVC444v2 decoding; bitmap is the RDP default.
 - VNC file transfer is not implemented. For a single visible pointer with
   WayVNC, start the server without `--render-cursor`.
 - Other Wayland compositors, X11, ARM64 and IME input still need validation.

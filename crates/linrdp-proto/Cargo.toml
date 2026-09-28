@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 der = { version = "0.7.10", features = ["derive", "std"] }
+ffmpeg-next = { version = "9.0.0", default-features = false, features = ["codec", "format"] }
 ironrdp-core = "0.2"
 ironrdp-graphics = "0.9"
 ironrdp-pdu = "0.9"

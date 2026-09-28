@@ -41,7 +41,7 @@ nla-probe requests an NTLM challenge without credentials.
 login prompts locally for a hidden password after TLS verification, then
 attempts NTLM CredSSP once. session-probe continues with MCS/GCC and channel
 setup after login, then disconnects. connect opens an interactive desktop window.
-Graphics defaults to bitmap. --graphics h264 requests experimental AVC420;
+Graphics defaults to bitmap. --graphics h264 requests experimental AVC420/AVC444v2;
 the server selects the actual codec. H.264 can also be enabled in TUI Options.
 connect defaults to 1024x768, dynamic resolution on, and clipboard on
 (Wayland text and file copy/paste). --size selects the initial dimensions;

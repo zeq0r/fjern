@@ -14,7 +14,7 @@ recorded as host verification.
 | RDP file clipboard | Verified | Expected | Not verified | VNC file transfer unsupported |
 | Dynamic RDP resolution | Verified | Expected | Not verified | One monitor only |
 | VNC resize and scaling | Verified | Expected | Not verified | |
-| H.264 / AVC420 | Experimental | Experimental | Experimental | Software decoding |
+| H.264 / AVC420 and AVC444v2 | Verified on Windows VM | Experimental | Experimental | Software decoding |
 | Multi-monitor | Not supported | Not supported | Not supported | |
 | ARM64 | Not verified | Not verified | Not verified | No release claim |
 

@@ -2,7 +2,7 @@
 use crate::codecs::clear::ClearCodecDecoder;
 use crate::codecs::progressive::ProgressiveDecoder;
 use crate::{
-    avc::DecoderPool,
+    avc::{AvcPart, DecoderPool, Region},
     desktop::{Error, Framebuffer, Result},
 };
 use std::collections::BTreeMap;
@@ -12,6 +12,8 @@ const MAX_PIXEL_WORK: usize = 128 * 1024 * 1024;
 const CACHE_PIXELS: usize = 4 * 1024 * 1024;
 const VERSION: u32 = 0x0008_0105;
 const FLAGS: u32 = 0x12; // SMALL_CACHE | AVC420_ENABLED; no AVC444.
+const VERSION_107: u32 = 0x000a_0701;
+const FLAGS_107: u32 = 0x82; // SMALL_CACHE | SCALEDMAP_DISABLE; AVC444v2 enabled.
 fn bad(s: impl Into<String>) -> Error {
     Error(s.into())
 }
@@ -148,9 +150,11 @@ impl Gfx {
         !self.pending.is_empty() || self.frame.is_some()
     }
     pub fn advertise(&self) -> Vec<u8> {
-        let mut b = 1u16.to_le_bytes().to_vec();
-        for n in [VERSION, 4, FLAGS] {
-            b.extend(n.to_le_bytes());
+        let mut b = 2u16.to_le_bytes().to_vec();
+        for (version, flags) in [(VERSION, FLAGS), (VERSION_107, FLAGS_107)] {
+            for n in [version, 4, flags] {
+                b.extend(n.to_le_bytes());
+            }
         }
         pdu(0x12, &b)
     }
@@ -212,15 +216,21 @@ impl Gfx {
                 let length = c.u32()?;
                 let flags = c.u32()?;
                 if self.confirmed
-                    || version != VERSION
                     || length != 4
-                    || !matches!(flags, 2 | FLAGS)
+                    || !matches!(
+                        (version, flags),
+                        (VERSION, 2 | FLAGS) | (VERSION_107, 2 | FLAGS_107)
+                    )
                 {
                     return Err(bad(format!(
                         "server selected unsupported graphics capabilities: version=0x{version:08x}, length={length}, flags=0x{flags:08x}"
                     )));
                 }
-                self.avc_enabled = flags & 0x10 != 0;
+                self.avc_enabled = if version == VERSION {
+                    flags & 0x10 != 0
+                } else {
+                    flags & 0x20 == 0
+                };
                 self.confirmed = true;
             }
             9 => {
@@ -250,7 +260,7 @@ impl Gfx {
                 if self.surfaces.remove(&id).is_none() {
                     return Err(bad("deleting unknown graphics surface"));
                 }
-                self.avc.remove(id);
+                self.avc.retire_surface(id);
             }
             0xe => {
                 if body.len() != 332 {
@@ -425,6 +435,54 @@ impl Gfx {
             surface.buffer.width as usize,
             surface.buffer.height as usize,
         )?;
+        if codec == 0xf {
+            let mut c = Cursor(data);
+            let info = c.u32()?;
+            let mode = (info >> 30) as u8;
+            let first_len = (info & 0x3fff_ffff) as usize;
+            if mode > 2 || first_len > c.0.len() {
+                return Err(bad("invalid AVC444v2 stream header"));
+            }
+            let (first_blob, second_blob) = c.0.split_at(first_len);
+            if (mode == 0 && second_blob.is_empty())
+                || (mode == 1 && !second_blob.is_empty())
+                || (mode == 2 && (!first_blob.is_empty() || second_blob.is_empty()))
+            {
+                return Err(bad("invalid AVC444v2 subframe count"));
+            }
+            let width = surface.buffer.width as usize;
+            let height = surface.buffer.height as usize;
+            let first_blob = if mode == 2 { second_blob } else { first_blob };
+            let (first_regions, first_bytes) = parse_avc_part(first_blob, width, height)?;
+            let (second_regions, second_bytes) = if mode == 0 {
+                let (regions, bytes) = parse_avc_part(second_blob, width, height)?;
+                (regions, Some(bytes))
+            } else {
+                (Vec::new(), None)
+            };
+            let target = &mut self.surfaces.get_mut(&id).unwrap().buffer;
+            let changed = self.avc.decode_444v2_into(
+                id,
+                (width, height),
+                mode,
+                AvcPart {
+                    bytes: first_bytes,
+                    regions: &first_regions,
+                },
+                second_bytes.map(|bytes| AvcPart {
+                    bytes,
+                    regions: &second_regions,
+                }),
+                &mut target.pixels,
+            )?;
+            if changed {
+                self.avc_frames = self.avc_frames.wrapping_add(1);
+                for &(_, top, _, bottom) in first_regions.iter().chain(&second_regions) {
+                    target.damage.mark(top, bottom);
+                }
+            }
+            return Ok(());
+        }
         if codec == 0xb {
             let mut meta = Cursor(data);
             let count = meta.u32()? as usize;
@@ -669,6 +727,28 @@ impl Gfx {
         Ok(())
     }
 }
+fn parse_avc_part(data: &[u8], width: usize, height: usize) -> Result<(Vec<Region>, &[u8])> {
+    let mut c = Cursor(data);
+    let count = c.u32()? as usize;
+    if count == 0 || count > 4096 || count > c.0.len() / 10 {
+        return Err(bad("invalid AVC444v2 region count"));
+    }
+    let mut regions = Vec::with_capacity(count);
+    let mut work = 0usize;
+    for _ in 0..count {
+        let rect = Rect::read(&mut c)?;
+        rect.check(width, height)?;
+        work = work.saturating_add(rect.width() * rect.height());
+        regions.push((rect.l, rect.t, rect.r, rect.b));
+    }
+    check_work(work)?;
+    c.take(count * 2)?; // Quantization/quality metadata; not required for decoding.
+    if c.0.is_empty() {
+        return Err(bad("empty AVC444v2 bitstream"));
+    }
+    Ok((regions, c.0))
+}
+
 fn check_work(pixels: usize) -> Result<()> {
     if pixels > MAX_PIXEL_WORK {
         Err(bad("graphics pixel work limit exceeded"))
@@ -892,6 +972,45 @@ mod tests {
         let mut g = Gfx::new();
         caps[8..12].copy_from_slice(&0x20u32.to_le_bytes());
         assert!(send(&mut g, 0x13, &caps).is_err());
+    }
+    #[test]
+    fn offers_avc444v2_and_accepts_version_107() {
+        let offered = Gfx::new().advertise();
+        assert_eq!(u16::from_le_bytes(offered[8..10].try_into().unwrap()), 2);
+        assert_eq!(
+            u32::from_le_bytes(offered[10..14].try_into().unwrap()),
+            VERSION
+        );
+        assert_eq!(
+            u32::from_le_bytes(offered[22..26].try_into().unwrap()),
+            VERSION_107
+        );
+        assert_eq!(
+            u32::from_le_bytes(offered[30..34].try_into().unwrap()),
+            FLAGS_107
+        );
+        let mut g = Gfx::new();
+        let mut caps = Vec::new();
+        for n in [VERSION_107, 4, FLAGS_107] {
+            caps.extend(n.to_le_bytes());
+        }
+        send(&mut g, 0x13, &caps).unwrap();
+        assert!(g.avc_enabled);
+        let mut g = Gfx::new();
+        caps[8..12].copy_from_slice(&0x22u32.to_le_bytes());
+        assert!(send(&mut g, 0x13, &caps).is_err());
+    }
+    #[test]
+    fn avc444v2_region_header_rejects_bad_bounds() {
+        let mut part = 1u32.to_le_bytes().to_vec();
+        part.extend(rect());
+        part.extend([0, 0]);
+        part.extend([0, 0, 0, 1, 9]);
+        let (regions, bytes) = parse_avc_part(&part, 4, 4).unwrap();
+        assert_eq!(regions, [(0, 0, 4, 4)]);
+        assert_eq!(bytes, [0, 0, 0, 1, 9]);
+        assert!(parse_avc_part(&part, 3, 4).is_err());
+        assert!(parse_avc_part(&part[..part.len() - 5], 4, 4).is_err());
     }
     #[test]
     fn frames_are_atomic_and_acknowledged() {

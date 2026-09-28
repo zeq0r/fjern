@@ -1,6 +1,7 @@
-//! Stateful, bounded AVC420 decoding. The wire payload is Annex B H.264.
+//! Stateful, bounded AVC decoding. The wire payload is Annex B H.264.
 use crate::desktop::{Error, Result};
-use openh264::{decoder::Decoder, formats::YUVSource};
+use ffmpeg_next::{Packet, codec, format, frame};
+use openh264::formats::YUVSource;
 use std::collections::HashMap;
 
 const MAX_SURFACES: usize = 64;
@@ -8,6 +9,52 @@ const MAX_INPUT: usize = 16 * 1024 * 1024;
 const MAX_PIXELS: usize = 16_777_216;
 const MAX_DIMENSION: usize = 8192;
 const MAX_NATIVE_BUDGET: usize = 256 * 1024 * 1024;
+const MAX_STORED_YUV: usize = 64 * 1024 * 1024;
+
+pub type Region = (usize, usize, usize, usize);
+
+#[derive(Clone, Copy)]
+pub struct AvcPart<'a> {
+    pub bytes: &'a [u8],
+    pub regions: &'a [Region],
+}
+
+#[derive(Default)]
+struct StoredYuv {
+    width: usize,
+    height: usize,
+    strides: (usize, usize, usize),
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
+}
+
+impl StoredYuv {
+    fn size(&self) -> usize {
+        self.y.capacity() + self.u.capacity() + self.v.capacity()
+    }
+
+    fn update(&mut self, source: &(impl YUVSource + ?Sized), other_bytes: usize) -> Result<()> {
+        let expected = self.y.capacity().max(source.y().len())
+            + self.u.capacity().max(source.u().len())
+            + self.v.capacity().max(source.v().len());
+        if expected > MAX_STORED_YUV || other_bytes > MAX_STORED_YUV - expected {
+            return Err(bad("AVC444 retained-picture memory budget exceeded"));
+        }
+        (self.width, self.height) = source.dimensions();
+        self.strides = source.strides();
+        self.y.clear();
+        self.y.extend_from_slice(source.y());
+        self.u.clear();
+        self.u.extend_from_slice(source.u());
+        self.v.clear();
+        self.v.extend_from_slice(source.v());
+        if self.size() > MAX_STORED_YUV - other_bytes {
+            return Err(bad("AVC444 retained-picture memory budget exceeded"));
+        }
+        Ok(())
+    }
+}
 
 pub struct Frame {
     pub width: usize,
@@ -18,9 +65,11 @@ pub struct Frame {
 
 #[derive(Default)]
 pub struct DecoderPool {
-    decoders: HashMap<u16, Decoder>,
+    decoders: HashMap<u16, codec::decoder::Video>,
     budgets: HashMap<u16, usize>,
     surface_bounds: HashMap<u16, (usize, usize)>,
+    previous_bounds: HashMap<u16, (usize, usize)>,
+    main_views: HashMap<u16, StoredYuv>,
 }
 impl DecoderPool {
     pub fn new() -> Self {
@@ -31,12 +80,40 @@ impl DecoderPool {
         self.decoders.remove(&surface_id);
         self.budgets.remove(&surface_id);
         self.surface_bounds.remove(&surface_id);
+        self.previous_bounds.remove(&surface_id);
+        self.main_views.remove(&surface_id);
+    }
+
+    /// Keep the old coded size across a surface replacement. Windows can send
+    /// a final picture at that size while switching to the new output size.
+    pub fn retire_surface(&mut self, surface_id: u16) {
+        let old = self
+            .surface_bounds
+            .get(&surface_id)
+            .copied()
+            .map(|current| {
+                let previous = self
+                    .previous_bounds
+                    .get(&surface_id)
+                    .copied()
+                    .unwrap_or((0, 0));
+                (current.0.max(previous.0), current.1.max(previous.1))
+            });
+        self.remove(surface_id);
+        if let Some(old) = old {
+            if self.previous_bounds.len() >= MAX_SURFACES {
+                self.previous_bounds.clear();
+            }
+            self.previous_bounds.insert(surface_id, old);
+        }
     }
 
     pub fn clear(&mut self) {
         self.decoders.clear();
         self.budgets.clear();
         self.surface_bounds.clear();
+        self.previous_bounds.clear();
+        self.main_views.clear();
     }
 
     pub fn decode(&mut self, surface_id: u16, data: &[u8]) -> Result<Option<Frame>> {
@@ -89,13 +166,71 @@ impl DecoderPool {
         .map(|frame| frame.is_some())
     }
 
+    /// AVC444v2 carries one or two YUV420 pictures through a single decoder.
+    /// The main picture is retained for later auxiliary-only updates.
+    pub fn decode_444v2_into(
+        &mut self,
+        surface_id: u16,
+        size: (usize, usize),
+        mode: u8,
+        first: AvcPart<'_>,
+        second: Option<AvcPart<'_>>,
+        target: &mut [u32],
+    ) -> Result<bool> {
+        let (width, height) = size;
+        if target.len() != width * height || mode > 2 || (mode == 0) != second.is_some() {
+            return Err(bad("invalid AVC444v2 update"));
+        }
+        let mut main = self.main_views.remove(&surface_id);
+        let other_bytes: usize = self.main_views.values().map(StoredYuv::size).sum();
+        let result = (|| {
+            let mut changed = false;
+            if mode != 2 {
+                let decoded = self.decode_with(surface_id, width, height, first.bytes, |yuv| {
+                    if main.is_none() {
+                        main = Some(StoredYuv::default());
+                    }
+                    let stored = main.as_mut().unwrap();
+                    stored.update(yuv, other_bytes)?;
+                    for &region in first.regions {
+                        render_420(stored, target, width, height, region)?;
+                    }
+                    Ok(())
+                })?;
+                changed |= decoded.is_some();
+            }
+            if mode != 1 {
+                let part = second.as_ref().unwrap_or(&first);
+                let decoded = self.decode_with(surface_id, width, height, part.bytes, |yuv| {
+                    let stored = main
+                        .as_ref()
+                        .ok_or_else(|| bad("AVC444v2 auxiliary picture before main picture"))?;
+                    for &region in part.regions {
+                        render_444v2(stored, yuv, target, width, height, region)?;
+                    }
+                    Ok(())
+                })?;
+                changed |= decoded.is_some();
+            }
+            Ok(changed)
+        })();
+        if result.is_ok() {
+            if let Some(main) = main {
+                self.main_views.insert(surface_id, main);
+            }
+        } else {
+            self.remove(surface_id);
+        }
+        result
+    }
+
     fn decode_with<T>(
         &mut self,
         surface_id: u16,
         width: usize,
         height: usize,
         data: &[u8],
-        consume: impl FnOnce(&openh264::decoder::DecodedYUV<'_>) -> Result<T>,
+        consume: impl FnOnce(&dyn YUVSource) -> Result<T>,
     ) -> Result<Option<T>> {
         let result = self.prepare_and_decode(surface_id, width, height, data, consume);
         if result.is_err() {
@@ -110,7 +245,7 @@ impl DecoderPool {
         width: usize,
         height: usize,
         data: &[u8],
-        consume: impl FnOnce(&openh264::decoder::DecodedYUV<'_>) -> Result<T>,
+        consume: impl FnOnce(&dyn YUVSource) -> Result<T>,
     ) -> Result<Option<T>> {
         if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
             return Err(bad("invalid AVC surface dimensions"));
@@ -123,7 +258,13 @@ impl DecoderPool {
             // A changed surface starts a fresh stream; stale SPS cannot allocate against old bounds.
             self.remove(surface_id);
         }
-        let budget = validate_annex_b(data, width, height)?;
+        let previous = self
+            .previous_bounds
+            .get(&surface_id)
+            .copied()
+            .unwrap_or((0, 0));
+        let (coded_width, coded_height) = (width.max(previous.0), height.max(previous.1));
+        let budget = validate_annex_b(data, coded_width, coded_height)?;
         if let Some(budget) = budget {
             // Keep the high-water estimate: parameter sets/reference buffers may survive a smaller SPS.
             let budget = budget.max(self.budgets.get(&surface_id).copied().unwrap_or(0));
@@ -145,30 +286,205 @@ impl DecoderPool {
             if self.decoders.len() >= MAX_SURFACES {
                 return Err(bad("too many AVC decoder surfaces"));
             }
-            let decoder =
-                Decoder::new().map_err(|e| bad(&format!("AVC decoder initialization: {e}")))?;
+            let codec = codec::decoder::find(codec::Id::H264)
+                .ok_or_else(|| bad("H.264 decoder unavailable"))?;
+            let decoder = codec::Context::new_with_codec(codec)
+                .decoder()
+                .video()
+                .map_err(|e| bad(&format!("AVC decoder initialization: {e}")))?;
             self.decoders.insert(surface_id, decoder);
             self.surface_bounds.insert(surface_id, (width, height));
         }
         let decoder = self.decoders.get_mut(&surface_id).unwrap();
-        let Some(yuv) = decoder
-            .decode(data)
-            .map_err(|e| bad(&format!("invalid AVC frame: {e}")))?
-        else {
+        decoder
+            .send_packet(&Packet::copy(data))
+            .map_err(|e| bad(&format!("invalid AVC packet: {e}")))?;
+        let mut decoded = None;
+        for _ in 0..16 {
+            let mut picture = frame::Video::empty();
+            match decoder.receive_frame(&mut picture) {
+                Ok(()) => decoded = Some(picture),
+                Err(ffmpeg_next::Error::Other {
+                    errno: ffmpeg_next::error::EAGAIN,
+                }) => break,
+                Err(e) => return Err(bad(&format!("invalid AVC frame: {e}"))),
+            }
+        }
+        let Some(picture) = decoded else {
             return Ok(None);
         };
+        if !matches!(
+            picture.format(),
+            format::Pixel::YUV420P | format::Pixel::YUVJ420P
+        ) || picture.planes() < 3
+        {
+            return Err(bad("AVC requires 8-bit planar 4:2:0 video"));
+        }
+        let yuv = FfmpegYuv(&picture);
         let (w, h) = yuv.dimensions();
         dimensions(w, h)?;
-        if w > width.div_ceil(16) * 16 || h > height.div_ceil(32) * 32 {
+        if w > coded_width.div_ceil(16) * 16 || h > coded_height.div_ceil(32) * 32 {
             return Err(bad("decoded AVC dimensions exceed the surface"));
         }
         consume(&yuv).map(Some)
     }
 }
 
+struct FfmpegYuv<'a>(&'a frame::Video);
+
+impl YUVSource for FfmpegYuv<'_> {
+    fn dimensions(&self) -> (usize, usize) {
+        (self.0.width() as usize, self.0.height() as usize)
+    }
+
+    fn strides(&self) -> (usize, usize, usize) {
+        (self.0.stride(0), self.0.stride(1), self.0.stride(2))
+    }
+
+    fn y(&self) -> &[u8] {
+        self.0.data(0)
+    }
+    fn u(&self) -> &[u8] {
+        self.0.data(1)
+    }
+    fn v(&self) -> &[u8] {
+        self.0.data(2)
+    }
+}
+
+fn check_region(region: Region, width: usize, height: usize, coded: (usize, usize)) -> Result<()> {
+    let (left, top, right, bottom) = region;
+    if left >= right
+        || top >= bottom
+        || right > width
+        || bottom > height
+        || right > coded.0
+        || bottom > coded.1
+    {
+        return Err(bad("AVC444v2 region outside decoded surface"));
+    }
+    Ok(())
+}
+
+fn rgb(y: u8, u: u8, v: u8) -> u32 {
+    let luma = i32::from(y) << 8;
+    let cb = i32::from(u) - 128;
+    let cr = i32::from(v) - 128;
+    (((luma + 403 * cr) >> 8).clamp(0, 255) as u32) << 16
+        | (((luma - 48 * cb - 120 * cr) >> 8).clamp(0, 255) as u32) << 8
+        | (((luma + 475 * cb) >> 8).clamp(0, 255) as u32)
+}
+
+fn render_420(
+    main: &StoredYuv,
+    target: &mut [u32],
+    width: usize,
+    height: usize,
+    region: Region,
+) -> Result<()> {
+    check_region(region, width, height, (main.width, main.height))?;
+    let (ys, us, vs) = main.strides;
+    if ys < main.width
+        || us < main.width.div_ceil(2)
+        || vs < main.width.div_ceil(2)
+        || main.y.len() < ys * main.height
+        || main.u.len() < us * main.height.div_ceil(2)
+        || main.v.len() < vs * main.height.div_ceil(2)
+    {
+        return Err(bad("truncated AVC444v2 main planes"));
+    }
+    let (left, top, right, bottom) = region;
+    for row in top..bottom {
+        for col in left..right {
+            target[row * width + col] = rgb(
+                main.y[row * ys + col],
+                main.u[row / 2 * us + col / 2],
+                main.v[row / 2 * vs + col / 2],
+            );
+        }
+    }
+    Ok(())
+}
+
+fn render_444v2(
+    main: &StoredYuv,
+    aux: &(impl YUVSource + ?Sized),
+    target: &mut [u32],
+    width: usize,
+    height: usize,
+    region: Region,
+) -> Result<()> {
+    let (coded_w, coded_h) = aux.dimensions();
+    check_region(region, width, height, (main.width, main.height))?;
+    check_region(region, width, height, (coded_w, coded_h))?;
+    if coded_w % 4 != 0 || coded_h % 2 != 0 || main.width != coded_w || main.height != coded_h {
+        return Err(bad("incompatible AVC444v2 picture dimensions"));
+    }
+    let (ys, _, _) = main.strides;
+    let (ays, aus, avs) = aux.strides();
+    let (_, mus, mvs) = main.strides;
+    if ys < coded_w
+        || mus < coded_w / 2
+        || mvs < coded_w / 2
+        || ays < coded_w
+        || aus < coded_w / 2
+        || avs < coded_w / 2
+        || main.y.len() < ys * coded_h
+        || main.u.len() < mus * coded_h / 2
+        || main.v.len() < mvs * coded_h / 2
+        || aux.y().len() < ays * coded_h
+        || aux.u().len() < aus * coded_h / 2
+        || aux.v().len() < avs * coded_h / 2
+    {
+        return Err(bad("truncated AVC444v2 auxiliary planes"));
+    }
+    let (left, top, right, bottom) = region;
+    for row in top..bottom {
+        for col in left..right {
+            let (u, v) = if col & 1 != 0 {
+                (
+                    aux.y()[row * ays + col / 2],
+                    aux.y()[row * ays + coded_w / 2 + col / 2],
+                )
+            } else {
+                let (plane, stride) = if col & 2 == 0 {
+                    (aux.u(), aus)
+                } else {
+                    (aux.v(), avs)
+                };
+                let offset = row / 2 * stride + col / 4;
+                let even_odd_u = plane[offset];
+                let even_odd_v = plane[offset + coded_w / 4];
+                if row & 1 != 0 {
+                    (even_odd_u, even_odd_v)
+                } else {
+                    if row + 1 >= coded_h {
+                        return Err(bad("AVC444v2 reverse filter exceeds picture"));
+                    }
+                    let (_, mus, mvs) = main.strides;
+                    let filtered_u = i32::from(main.u[row / 2 * mus + col / 2]);
+                    let filtered_v = i32::from(main.v[row / 2 * mvs + col / 2]);
+                    let odd_even_u = i32::from(aux.y()[row * ays + col / 2]);
+                    let odd_even_v = i32::from(aux.y()[row * ays + coded_w / 2 + col / 2]);
+                    let odd_odd_u = i32::from(aux.y()[(row + 1) * ays + col / 2]);
+                    let odd_odd_v = i32::from(aux.y()[(row + 1) * ays + coded_w / 2 + col / 2]);
+                    (
+                        (4 * filtered_u - odd_even_u - i32::from(even_odd_u) - odd_odd_u)
+                            .clamp(0, 255) as u8,
+                        (4 * filtered_v - odd_even_v - i32::from(even_odd_v) - odd_odd_v)
+                            .clamp(0, 255) as u8,
+                    )
+                }
+            };
+            target[row * width + col] = rgb(main.y[row * ys + col], u, v);
+        }
+    }
+    Ok(())
+}
+
 /// MS-RDPEGFX 3.3.8.3.1 uses full-range BT.709, regardless of video-library
 /// display defaults. OpenH264's write_rgb8 instead uses limited-range BT.601.
-fn rdp_rgb(yuv: &impl YUVSource) -> Vec<u32> {
+fn rdp_rgb(yuv: &(impl YUVSource + ?Sized)) -> Vec<u32> {
     let (width, height) = yuv.dimensions();
     let mut output = vec![0; width * height];
     convert_region(yuv, &mut output, width, (0, 0, width, height));
@@ -176,7 +492,7 @@ fn rdp_rgb(yuv: &impl YUVSource) -> Vec<u32> {
 }
 
 fn convert_region(
-    yuv: &impl YUVSource,
+    yuv: &(impl YUVSource + ?Sized),
     output: &mut [u32],
     stride: usize,
     (left, top, right, bottom): (usize, usize, usize, usize),
@@ -490,6 +806,35 @@ mod tests {
         red(pool.decode(1, P).unwrap().unwrap());
     }
     #[test]
+    fn avc444v2_modes_share_h264_reference_state() {
+        let mut pool = DecoderPool::new();
+        let mut pixels = vec![0; 32 * 32];
+        let region = [(0, 0, 32, 32)];
+        let idr = AvcPart {
+            bytes: IDR,
+            regions: &region,
+        };
+        let p = AvcPart {
+            bytes: P,
+            regions: &region,
+        };
+        assert!(
+            pool.decode_444v2_into(1, (32, 32), 1, idr, None, &mut pixels)
+                .unwrap()
+        );
+        assert!(
+            pool.decode_444v2_into(1, (32, 32), 2, p, None, &mut pixels)
+                .unwrap()
+        );
+        assert!(
+            pool.decode_444v2_into(1, (32, 32), 0, p, Some(p), &mut pixels)
+                .unwrap()
+        );
+        assert!(pool.main_views.contains_key(&1));
+        pool.remove(1);
+        assert!(pool.main_views.is_empty());
+    }
+    #[test]
     fn surfaces_have_independent_reference_state_and_cleanup() {
         let mut pool = DecoderPool::new();
         red(pool.decode(1, IDR).unwrap().unwrap());
@@ -501,6 +846,26 @@ mod tests {
         pool.clear();
         assert!(pool.decoders.is_empty());
         assert!(pool.decode(2, P).is_err());
+    }
+    #[test]
+    fn retired_surface_allows_previous_coded_size_during_resize() {
+        let mut pool = DecoderPool::new();
+        red(pool.decode_bounded(1, 32, 32, IDR).unwrap().unwrap());
+        pool.retire_surface(1);
+        let mut pixels = vec![0; 16 * 16];
+        assert!(
+            pool.decode_into(1, 16, 16, IDR, &mut pixels, &[(0, 0, 16, 16)])
+                .unwrap()
+        );
+        assert!(pixels.iter().all(|pixel| pixel & 0xff0000 >= 0xf50000));
+        pool.retire_surface(1);
+        let mut smaller = vec![0; 8 * 8];
+        assert!(
+            pool.decode_into(1, 8, 8, IDR, &mut smaller, &[(0, 0, 8, 8)])
+                .unwrap()
+        );
+        pool.remove(1);
+        assert!(pool.decode_bounded(1, 16, 16, IDR).is_err());
     }
     #[test]
     fn rejects_malformed_or_oversized_payloads_before_decoder_creation() {
@@ -613,6 +978,27 @@ mod tests {
 mod color_tests {
     use super::*;
     use openh264::formats::YUVSlices;
+    #[test]
+    fn avc444v2_reconstructs_chroma_from_main_and_auxiliary_planes() {
+        let main = StoredYuv {
+            width: 4,
+            height: 2,
+            strides: (4, 2, 2),
+            y: vec![128; 8],
+            u: vec![150; 2],
+            v: vec![128; 2],
+        };
+        let ay = [120, 120, 128, 128, 140, 140, 128, 128];
+        let au = [130, 128];
+        let av = [130, 128];
+        let aux = YUVSlices::new((&ay, &au, &av), (4, 2), (4, 2, 2));
+        let mut pixels = vec![0; 8];
+        render_444v2(&main, &aux, &mut pixels, 4, 2, (0, 0, 4, 2)).unwrap();
+        assert_eq!(pixels[0], rgb(128, 210, 128));
+        assert_eq!(pixels[1], rgb(128, 120, 128));
+        assert_eq!(pixels[4], rgb(128, 130, 128));
+        assert!(render_444v2(&main, &aux, &mut pixels, 4, 2, (0, 0, 5, 2)).is_err());
+    }
     #[test]
     #[ignore = "release CPU benchmark"]
     fn benchmark_avc_region_conversion() {

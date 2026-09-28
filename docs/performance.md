@@ -453,9 +453,9 @@ acknowledgements and compression framing. H.264 modes are selected through
 that extension's capabilities, independently of bitmap-codec capabilities.
 See Microsoft's [graphics capability negotiation specification](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/31c6e2b1-335b-4a75-9454-bb2309958c21).
 
-The experimental profile implements version 8.1 with software AVC420 decoding.
-Hardware decoding and AVC444 remain future work. See [H.264](h264.md) for the
-supported codecs and limits of current Windows validation.
+The experimental profile offers version 8.1 AVC420 and version 10.7 AVC444v2,
+both with software decoding. Hardware decoding and AVC444v1 remain future work.
+See [H.264](h264.md) for supported codecs and Windows validation.
 
 ## Native Wayland submission
 
